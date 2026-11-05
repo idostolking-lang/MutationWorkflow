@@ -38,7 +38,7 @@ against its schema again.
 | Table           | One row per            | Indexed columns                                                                                                                      |
 | --------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `meta`          | Key/value setting      | `key`, `value` (`schema_version` = number of migrations applied)                                                                     |
-| `targets`       | Target from the config | `id`, `updated_at`; upserted from the config on every start, never deleted                                                           |
+| `targets`       | Target from the config | `id`, `updated_at`; redacted copy upserted from the config on every start, never deleted                                             |
 | `workflows`     | Workflow               | `target_id`, `fingerprint`, `origin`, `status`, `parent_id`, `created_at`, `updated_at`; unique `(target_id, fingerprint)`           |
 | `workflows_fts` | Workflow (FTS5)        | `id` (unindexed), `title`, `intent`, `tags`, `steps_text`                                                                            |
 | `runs`          | Run                    | `workflow_id`, `target_id`, `status`, `trigger`, `job_id`, `started_at`, `finished_at`                                               |
@@ -48,6 +48,11 @@ against its schema again.
 | `questions`     | Question               | `target_id`, `status`, `created_at`                                                                                                  |
 | `jobs`          | Job                    | `kind`, `status`, `created_at`                                                                                                       |
 | `usage`         | Model call             | `seq`, `job_id`, `role`, `provider`, `model`, token counts, `cost_usd`, `at`                                                         |
+
+The `targets` table holds a redacted copy of each target: identity steps (which usually contain
+logins) are emptied and the `env`, `launchOptions` and `storageStatePath` options are removed.
+Engines always use the live config, so the stored copy is informational and safe to share with
+the rest of the database.
 
 Record shapes are documented in [Workflows](workflows.md#the-record) (workflows, runs, evidence)
 and [Oracles](oracles.md) (findings, questions). Ids carry a prefix and sort by creation time:
@@ -149,13 +154,16 @@ so MCP clients can start it, return immediately and poll, and history survives r
 | `kind`                                 | `setup`, `explore`, `mutate`, `run`, `triage`, `cycle`, `watch`                      |
 | `status`                               | `queued` or `running`, then `succeeded`, `failed` or `cancelled`                      |
 | `params`                               | The parameters it was started with                                                   |
+| `owner`                                | `{ pid, host }` of the process running the job                                       |
 | `progress`                             | `{ message, current?, total? }`, updated while it runs                               |
 | `result`, `error`                      | Outcome                                                                              |
 | `createdAt`, `startedAt`, `finishedAt` |                                                                                      |
 
-Runs and usage rows carry the job id, so a job's runs and spend can be queried. When the engine
-starts, jobs left `queued` or `running` by a previous process (one that was killed or crashed) are
-marked `failed` with the error "Interrupted: the process ended before the job finished".
+Runs and usage rows carry the job id, so a job's runs and spend can be queried. When an engine
+starts, it looks at jobs still `queued` or `running` and marks a job `failed` with the error
+"Interrupted: the process ended before the job finished" only when its owner process is gone from
+this machine (or the job has no owner recorded). Jobs owned by a live process, such as an MCP
+server and a CLI command sharing one database, and jobs owned by another host are left alone.
 
 ## Backup and portability
 

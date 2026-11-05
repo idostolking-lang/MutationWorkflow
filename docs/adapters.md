@@ -34,7 +34,8 @@ pnpm exec playwright install chromium
 
 | Option             | Default                        | Meaning                                                 |
 | ------------------ | ------------------------------ | ------------------------------------------------------- |
-| `baseUrl`          | required                       | Root http(s) URL of the application                     |
+| `baseUrl`          | required                       | Root http(s) URL of the application; loopback host only |
+| `allowRemoteBaseUrl` | `false`                      | Allow a `baseUrl` that is not a loopback host           |
 | `browser`          | `chromium`                     | `chromium`, `firefox` or `webkit`                       |
 | `headless`         | `true`                         | Run without a window                                    |
 | `viewport`         | `{ width: 1280, height: 800 }` | CSS pixels                                              |
@@ -43,6 +44,16 @@ pnpm exec playwright install chromium
 
 One browser is launched lazily per target; every session is a new browser context and page
 starting on `about:blank`, so sessions share no cookies, storage or cache.
+
+`baseUrl` must point at a loopback host: `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]`.
+Anything else is rejected with `CONFIG_INVALID` unless `allowRemoteBaseUrl: true` is set. Set it
+only for a local instance you started that is reached under another host name (a container or VM
+on your machine); never point it at a shared or production environment.
+
+Workflows run in a single tab. Pages the application opens (`target="_blank"`, `window.open`)
+never load: they are closed at once, the next action's outcome message says so ("popup to <url>
+closed"), and the workflow continues in the original page. Service workers are blocked, because
+their requests would bypass scope enforcement.
 
 ### Locators
 
@@ -75,13 +86,13 @@ absent, the action is `blocked` as ambiguous.
 | Type         | Fields                   | Example                                                                          | Notes                                                                     |
 | ------------ | ------------------------ | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `navigate`   | `url`                    | `{ "type": "navigate", "url": "/" }`                                             | Relative to `baseUrl`; scope-checked; waits for `load`                    |
-| `click`      | `target`                 | `{ "type": "click", "target": { "role": "button", "name": "Save" } }`            | denyText-checked                                                          |
-| `dblclick`   | `target`                 | `{ "type": "dblclick", "target": { "text": "Buy milk", "exact": true } }`        | denyText-checked                                                          |
+| `click`      | `target`                 | `{ "type": "click", "target": { "role": "button", "name": "Save" } }`            | denyText-guarded                                                          |
+| `dblclick`   | `target`                 | `{ "type": "dblclick", "target": { "text": "Buy milk", "exact": true } }`        | denyText-guarded                                                          |
 | `fill`       | `target`, `value`        | `{ "type": "fill", "target": { "label": "Email" }, "value": "ada@example.com" }` | Replaces content                                                          |
-| `press`      | `key`, `target?`         | `{ "type": "press", "key": "Enter", "target": { "label": "Search" } }`           | Playwright key syntax; focused element without `target`                   |
-| `select`     | `target`, `value`        | `{ "type": "select", "target": { "label": "Country" }, "value": "Norway" }`      | Option value or label                                                     |
-| `check`      | `target`                 | `{ "type": "check", "target": { "role": "checkbox", "name": "Remember me" } }`   | denyText-checked                                                          |
-| `uncheck`    | `target`                 | `{ "type": "uncheck", "target": { "role": "checkbox", "name": "Remember me" } }` |                                                                           |
+| `press`      | `key`, `target?`         | `{ "type": "press", "key": "Enter", "target": { "label": "Search" } }`           | Playwright key syntax; focused element without `target`; denyText-guarded |
+| `select`     | `target`, `value`        | `{ "type": "select", "target": { "label": "Country" }, "value": "Norway" }`      | Option value or label; denyText-guarded                                   |
+| `check`      | `target`                 | `{ "type": "check", "target": { "role": "checkbox", "name": "Remember me" } }`   | denyText-guarded                                                          |
+| `uncheck`    | `target`                 | `{ "type": "uncheck", "target": { "role": "checkbox", "name": "Remember me" } }` | denyText-guarded                                                          |
 | `hover`      | `target`                 | `{ "type": "hover", "target": { "role": "button", "name": "Account" } }`         |                                                                           |
 | `scroll`     | `target`                 | `{ "type": "scroll", "target": { "role": "contentinfo" } }`                      | Into view                                                                 |
 | `wait`       | `ms?`, `target?`, `url?` | `{ "type": "wait", "target": { "role": "heading", "name": "Dashboard" } }`       | At least one; `ms` at most 60000; `url` is a glob, path glob or `/regex/` |
@@ -91,7 +102,8 @@ absent, the action is `blocked` as ambiguous.
 | `screenshot` | `label?`                 | `{ "type": "screenshot", "label": "after-checkout" }`                            | Always saved                                                              |
 
 `blocked` when the element is missing, hidden, disabled, ambiguous or of the wrong kind within
-`stepTimeoutMs`, when it matches `scope.denyText`, or when a URL is out of scope. `error` when
+`stepTimeoutMs`, when it matches `scope.denyText`, or when a navigation it caused is out of
+scope (the message names the URL). `error` when
 the page crashed, a navigation failed or timed out, or Playwright failed otherwise. After each
 action the adapter waits until no request has been in flight for 100 ms (at most 3 s), so the
 signals an action causes are attributed to its step.
@@ -121,7 +133,7 @@ evaluated once and is subject to scope.
 | -------------------- | ------------------------------------------------------------------------------ |
 | `console-error`      | `console.error` in the page, except Chromium's "Failed to load resource" lines |
 | `uncaught-exception` | Uncaught errors in the page                                                    |
-| `network-error`      | Failed requests, except ones the browser cancelled                             |
+| `network-error`      | Failed requests, except ones the browser cancelled or scope aborted                             |
 | `http-error`         | Responses with status 400 or more; `details: { status, url, method }`          |
 | `crash`              | The page crashed                                                               |
 
@@ -141,7 +153,7 @@ supported).
 | `args`          | `[]`         | Arguments, before any per-action `args`                     |
 | `cwd`           | project root | Relative to the project root                                |
 | `env`           | `{}`         | Merged over the current environment                         |
-| `shell`         | `false`      | Run through the system shell                                |
+| `shell`         | `false`      | Run through the system shell (arguments are quoted, below)  |
 | `promptPattern` | none         | Multiline regex for the prompt shown when input is expected |
 | `exitTimeoutMs` | `5000`       | How long `close` waits before SIGTERM, then SIGKILL         |
 
@@ -178,7 +190,7 @@ prompt (`> 5`): anchor with `\b5$`, not `^5$`.
 
 | Signal         | Raised when                                                                                                                                          |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stderr`       | A burst of stderr looks like an error (error words, `*Error`/`*Exception` names, stack frames); one signal per burst, named by its most telling line |
+| `stderr`       | A burst of stderr shows a defect: a stack frame (JavaScript `at fn (file:line:col)`, Java `at pkg.Class.method(File.java:12)`, Python `File "app.py", line 3`), an exception class name such as `TypeError`, or `Traceback`, `panic:`, `fatal`, `unhandled`, `segmentation fault`, `core dumped`. Plain `error:` or `warning:` lines, which apps print when they correctly reject input, do not count. One signal per burst, named by its most telling line |
 | `process-exit` | Non-zero exit the workflow did not cause (`exec`, `close`, and 130/143 after a requested SIGINT/SIGTERM are expected)                                |
 | `crash`        | Terminated by a signal the workflow did not send                                                                                                     |
 
@@ -190,16 +202,36 @@ available; `capture('output')` stores the full transcript as a `log` file.
 ## Scope enforcement
 
 Scope (`targets[].scope`, see [Configuration](configuration.md#targetsscope)) is enforced
-inside the adapter, so it applies equally to agents exploring and to replays. The web adapter:
+inside the adapter, so it applies equally to agents exploring and to replays. "In scope" means
+matching `allowUrls` (when empty: the `baseUrl` origin followed by `/**`) and not matching
+`denyUrls`.
 
-- refuses `navigate` to a URL outside `allowUrls` (default: the base URL's origin) or inside
-  `denyUrls` (`blocked`);
-- after any action, if the page ended up out of scope, goes back and reports `blocked`;
-- refuses `click`, `dblclick`, `check` and `press` on a target whose text, `aria-label` or
-  `value` matches a `denyText` pattern (`blocked`);
-- refuses `http` assertions to out-of-scope URLs.
+The web adapter enforces it inside the browser, before requests leave it. A route on every
+session's browser context aborts:
 
-The cli adapter has no URLs or controls and does not apply scope.
+- every navigation (of the page, an iframe or a popup) to an out-of-scope URL, and
+- every out-of-scope request whose method is not `GET` or `HEAD`, since those can have side
+  effects.
+
+Out-of-scope `GET` subresources (fonts, scripts or images from a CDN) still load, so local
+applications keep working. Aborted requests are noted in the console evidence and are not
+reported as `network-error` signals. In addition:
+
+- `navigate` to an out-of-scope URL is refused up front (`blocked`);
+- as a backstop, the page URL is checked after every action (redirects are not re-routed), and a
+  page that ended up out of scope is left with `back` (`blocked`);
+- `denyText` guards `click`, `dblclick`, `check`, `uncheck`, `press` (on its target, or without
+  one on the focused element) and `select` (the chosen option's label and value and the select's
+  `aria-label`): when the control's text, `aria-label` or `value` matches a pattern, the action is
+  `blocked`;
+- `http` assertions to out-of-scope URLs fail without a request.
+
+The cli adapter has no URLs or controls and does not apply scope. Its own safety rule concerns
+arguments: with `shell: true`, the `command` string goes to the shell as written (so it may use
+shell syntax), but on POSIX every configured and per-action argument is single-quoted first, so
+`"; rm -rf ~"` reaches the program as one literal argument. On Windows, where `cmd.exe` has no
+safe quoting, configured `args` are passed as they are, and `start` or `exec` with per-action
+`args` is rejected by validation (and reported `blocked` if it reaches a run).
 
 ## Writing your own adapter
 
