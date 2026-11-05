@@ -1,0 +1,57 @@
+{
+  "name": "mutationworkflow",
+  "version": "0.1.0",
+  "description": "AI agents that discover, mutate and replay user workflows to find the bugs that live between your test cases. CLI and MCP server.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "mw": "./dist/bin.js",
+    "mutationworkflow": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run --project unit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@mutationworkflow/adapter-cli": "workspace:*",
+    "@mutationworkflow/adapter-web": "workspace:*",
+    "@mutationworkflow/core": "workspace:*",
+    "commander": "^15.0.0",
+    "croner": "^11.0.0",
+    "picocolors": "^1.1.1",
+    "zod": "^4.6.7"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/idostolking-lang/MutationWorkflow.git",
+    "directory": "packages/mutationworkflow"
+  },
+  "homepage": "https://github.com/idostolking-lang/MutationWorkflow#readme",
+  "bugs": "https://github.com/idostolking-lang/MutationWorkflow/issues",
+  "keywords": [
+    "testing",
+    "ai-agents",
+    "exploratory-testing",
+    "workflow-mutation",
+    "playwright",
+    "mcp",
+    "mcp-server",
+    "claude-code",
+    "codex",
+    "cursor"
+  ]
+}

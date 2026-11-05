@@ -1,0 +1,14 @@
+{
+  "name": "@mutationworkflow-examples/counter-cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Tiny dependency-free interactive command-line app with deliberate sequence bugs. Used to demonstrate and test MutationWorkflow.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "counter": "./cli.js"
+  },
+  "scripts": {
+    "start": "node cli.js"
+  }
+}
