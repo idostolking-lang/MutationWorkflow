@@ -6,9 +6,5 @@
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"],
-  "references": [
-    { "path": "../core" },
-    { "path": "../adapter-web" },
-    { "path": "../adapter-cli" }
-  ]
+  "references": [{ "path": "../core" }, { "path": "../adapter-web" }, { "path": "../adapter-cli" }]
 }
