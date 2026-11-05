@@ -16,8 +16,8 @@ import {
   workflowFingerprint,
 } from '../schema/index.js';
 import type { Store } from '../store/types.js';
-import { errorMessage } from '../util/errors.js';
 import type { Logger } from '../util/logger.js';
+import { workflowProblem } from './identity.js';
 
 export interface MutateDeps {
   store: Store;
@@ -53,7 +53,8 @@ const MAX_AGENT_VARIANTS = 6;
 /**
  * Derive new workflow variants for a target. Deterministic operators run first and are cheap;
  * the mutator agent is optional and adds semantically interesting variants. Variants whose
- * actions already exist (same fingerprint) are never stored twice.
+ * actions already exist (same fingerprint) are never stored twice, and the cap is a total per
+ * base workflow, so repeated calls converge.
  */
 export async function mutate(deps: MutateDeps, options: MutateOptions = {}): Promise<MutateResult> {
   const { store, config, target, adapter, logger } = deps;
@@ -81,7 +82,6 @@ export async function mutate(deps: MutateDeps, options: MutateOptions = {}): Pro
   let fromOperators = 0;
 
   for (const base of bases) {
-    // The cap is per base workflow in total, not per call, so repeated runs converge.
     const remaining = maxVariants - (await store.workflows.count({ parentId: base.id }));
     if (remaining <= 0) continue;
     const variants = generateVariants(base, operators, context, {
@@ -89,7 +89,11 @@ export async function mutate(deps: MutateDeps, options: MutateOptions = {}): Pro
       existingFingerprints: existing,
     });
     for (const variant of variants) {
-      if (!validSteps(adapter, variant, logger)) continue;
+      const problem = workflowProblem(adapter, variant);
+      if (problem) {
+        logger.warn(`Skipping variant "${variant.title}": ${problem}`);
+        continue;
+      }
       await store.workflows.insert(variant);
       existing.add(variant.fingerprint);
       created.push(variant);
@@ -147,7 +151,8 @@ async function agentVariants(
   }
   let count = 0;
   for (const proposal of (result.output as AgentVariants).variants) {
-    const steps = normalizeSteps(proposal.steps);
+    // Ids the model copied from the base would collide; positions decide them.
+    const steps = normalizeSteps(proposal.steps.map(({ id: _id, ...step }) => step));
     const fingerprint = workflowFingerprint(target.id, base.identity, steps);
     if (existing.has(fingerprint)) continue;
     const workflow = createWorkflow(
@@ -167,32 +172,15 @@ async function agentVariants(
         mutation: { operator: 'agent', description: proposal.description },
       },
     );
-    if (!validSteps(adapter, workflow, logger)) continue;
+    const problem = workflowProblem(adapter, workflow);
+    if (problem) {
+      logger.warn(`Skipping agent variant "${workflow.title}": ${problem}`);
+      continue;
+    }
     await store.workflows.insert(workflow);
     existing.add(fingerprint);
     created.push(workflow);
     count += 1;
   }
   return count;
-}
-
-function validSteps(adapter: Adapter, workflow: Workflow, logger: Logger): boolean {
-  for (const step of workflow.steps) {
-    try {
-      adapter.validateAction(step.action);
-      for (const assertion of step.expect) adapter.validateAssertion(assertion);
-    } catch (error) {
-      logger.warn(`Skipping variant "${workflow.title}": ${errorMessage(error)}`);
-      return false;
-    }
-  }
-  for (const assertion of workflow.expect) {
-    try {
-      adapter.validateAssertion(assertion);
-    } catch (error) {
-      logger.warn(`Skipping variant "${workflow.title}": ${errorMessage(error)}`);
-      return false;
-    }
-  }
-  return true;
 }

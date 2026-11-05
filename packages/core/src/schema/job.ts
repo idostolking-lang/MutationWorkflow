@@ -21,6 +21,10 @@ export const JobSchema = z.object({
   kind: JobKindSchema,
   status: JobStatusSchema,
   params: z.record(z.string(), z.unknown()).default({}),
+  owner: z
+    .object({ pid: z.number().int(), host: z.string() })
+    .optional()
+    .describe('Process that runs the job, so stale jobs can be told from live ones'),
   progress: z
     .object({
       message: z.string(),

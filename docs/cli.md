@@ -67,7 +67,7 @@ config already exists it is left untouched and the proposal is written to
 
 | Option          | Meaning                                                           |
 | --------------- | ----------------------------------------------------------------- |
-| `--no-validate` | Do not start each proposed environment to check its start command |
+| `--validate` | Start each proposed environment once to check its start command (off by default: review the model-written commands first) |
 | `--name <name>` | Project name                                                      |
 
 ### `mw doctor`

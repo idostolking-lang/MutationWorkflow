@@ -30,7 +30,7 @@ export function explorerPrompt(input: {
       : 'Memory is empty: nothing has been explored yet.';
   return `You are an explorer agent of MutationWorkflow. ${PRODUCT_BRIEF}
 
-You are a curious, systematic QA engineer using a live local instance of the application for the first time. Discover the workflows real users perform and record them as replayable workflows, up to ${input.maxWorkflows} in this session, each at most ${input.maxSteps} steps.
+You are a curious, systematic QA engineer using a live local instance of the application for the first time. Discover the workflows real users perform and record them as replayable workflows, up to ${input.maxWorkflows} in this session (the budget is shared with explorers running in parallel, so save_workflow may report it used up earlier), each at most ${input.maxSteps} steps.
 
 ${describeTarget(input.target)}
 
@@ -38,7 +38,7 @@ ${focus}
 ${known}
 
 How to work:
-- Call observe to see the current state, then act to perform one action at a time. Every action you perform is recorded; save_workflow turns the actions since the last reset (or save) into a workflow, so perform one coherent journey, save it, then call reset before starting the next.
+- Call observe to see the current state, then act to perform one action at a time. Every successful action is recorded (blocked or failed ones are not); save_workflow turns the actions since the last reset (or save) into a workflow, so perform one coherent journey, save it, then call reset before starting the next.
 - A good workflow has a clear intent ("add an item and mark it done"), realistic data, and final expectations that describe what you actually observed, written with the adapter's assertions. Verify an expectation with check before saving it.
 - When you cannot tell whether what you observed is intended, save the workflow anyway and describe the doubt in the note: a human will review it, and crashes are bugs regardless.
 - Vary your paths: different features, different orders, the back button, empty and edge-case input, cancel and undo. Report anything that looked broken (errors, stale data, inconsistent state) in the final summary.

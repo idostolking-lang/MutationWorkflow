@@ -1,7 +1,7 @@
 import type { ModelProvider } from '../agents/provider.js';
 import { createProviders } from '../agents/providers/index.js';
 import { type AgentEvent, AgentRuntime } from '../agents/runtime.js';
-import type { ResolvedConfig } from '../config/load.js';
+import { loadConfig, type ResolvedConfig } from '../config/load.js';
 import type { AgentRole, Config } from '../config/schema.js';
 import { EnvironmentManager, withEnvironment } from '../environment/manager.js';
 import { resolveOracles } from '../oracles/registry.js';
@@ -16,6 +16,7 @@ import {
   type Question,
   type QuestionDecision,
   QuestionSchema,
+  redactTarget,
   type Severity,
   SeveritySchema,
   type TargetConfig,
@@ -25,7 +26,7 @@ import {
 } from '../schema/index.js';
 import { openSqliteStore } from '../store/sqlite.js';
 import type { RunStats, Store, UsageTotals } from '../store/types.js';
-import { MutationWorkflowError } from '../util/errors.js';
+import { errorMessage, MutationWorkflowError } from '../util/errors.js';
 import { createLogger, type Logger } from '../util/logger.js';
 import { type AdapterLoader, AdapterRegistry } from './adapters.js';
 import { type ExploreOptions, type ExploreResult, explore } from './explore.js';
@@ -72,6 +73,8 @@ export interface StatusSummary {
     providers: string[];
     maxParallel: number;
     models: Partial<Record<AgentRole, string>>;
+    /** Roles that cannot run with the current configuration, with the reason. */
+    problems: string[];
   };
   usage: UsageTotals;
   openQuestions: number;
@@ -81,7 +84,7 @@ export interface WatchOptions extends Pick<AgentHooks, 'jobId' | 'onEvent'> {
   targetIds?: string[];
   signal: AbortSignal;
   maxCycles?: number;
-  onCycle?: (cycle: number, summary: RunSummary) => void;
+  onCycle?: (cycle: number, summary: RunSummary | undefined, error?: string) => void;
 }
 
 export interface AnswerResult {
@@ -92,80 +95,111 @@ export interface AnswerResult {
 
 const ROLES: AgentRole[] = ['inspector', 'explorer', 'mutator', 'triager'];
 
-interface EngineFields {
-  config: Config;
-  rootDir: string;
-  configPath: string | undefined;
-  evidenceRoot: string;
-  reportsDir: string;
-  store: Store;
-  registry: AdapterRegistry;
-  environments: EnvironmentManager;
-  agents: AgentRuntime;
-  jobs: JobManager;
-  logger: Logger;
-  oracles: Oracle[];
-}
-
 /**
  * The engine wires configuration, memory, adapters, environments and agents together and
  * exposes every operation the CLI and the MCP server offer. One instance per project.
  */
 export class Engine {
-  readonly config: Config;
   readonly rootDir: string;
-  readonly configPath: string | undefined;
-  readonly evidenceRoot: string;
-  readonly reportsDir: string;
   readonly store: Store;
   readonly registry: AdapterRegistry;
   readonly environments: EnvironmentManager;
-  readonly agents: AgentRuntime;
   readonly jobs: JobManager;
   readonly logger: Logger;
-  readonly oracles: Oracle[];
+  private current: Config;
+  private currentPath: string | undefined;
+  private currentEvidenceRoot: string;
+  private currentReportsDir: string;
+  private currentAgents: AgentRuntime;
+  private currentOracles: Oracle[];
 
-  private constructor(fields: EngineFields) {
-    this.config = fields.config;
-    this.rootDir = fields.rootDir;
-    this.configPath = fields.configPath;
-    this.evidenceRoot = fields.evidenceRoot;
-    this.reportsDir = fields.reportsDir;
+  private constructor(
+    private readonly options: EngineOptions,
+    resolved: ResolvedConfig,
+    fields: {
+      store: Store;
+      registry: AdapterRegistry;
+      environments: EnvironmentManager;
+      jobs: JobManager;
+      logger: Logger;
+    },
+  ) {
+    this.rootDir = resolved.rootDir;
     this.store = fields.store;
     this.registry = fields.registry;
     this.environments = fields.environments;
-    this.agents = fields.agents;
     this.jobs = fields.jobs;
     this.logger = fields.logger;
-    this.oracles = fields.oracles;
+    this.current = resolved.config;
+    this.currentPath = resolved.path;
+    this.currentEvidenceRoot = resolved.resolvePath(resolved.config.evidenceDir);
+    this.currentReportsDir = resolved.resolvePath(resolved.config.reportsDir);
+    this.currentOracles = options.oracles ?? resolveOracles(resolved.config.oracles.enabled);
+    this.currentAgents = this.buildAgents(resolved.config);
   }
 
   static async create(options: EngineOptions): Promise<Engine> {
     const logger = options.logger ?? createLogger();
-    const { config, rootDir, path, resolvePath } = options.config;
+    const { config, rootDir, resolvePath } = options.config;
     const store = options.store ?? openSqliteStore(resolvePath(config.store.path));
     await store.init();
-    for (const target of config.targets) await store.targets.upsert(target);
+    for (const target of config.targets) await store.targets.upsert(redactTarget(target));
     const registry = new AdapterRegistry({ rootDir, logger });
     for (const [name, loader] of Object.entries(options.adapters ?? {}))
       registry.register(name, loader);
-    const providers = options.providers ?? createProviders(config, { env: options.env, logger });
     const jobs = new JobManager(store, logger);
-    await jobs.recover();
-    return new Engine({
-      config,
-      rootDir,
-      configPath: path,
-      evidenceRoot: resolvePath(config.evidenceDir),
-      reportsDir: resolvePath(config.reportsDir),
+    const recovered = await jobs.recover();
+    if (recovered > 0)
+      logger.warn(`Marked ${recovered} interrupted job(s) from a previous process as failed`);
+    return new Engine(options, options.config, {
       store,
       registry,
       environments: new EnvironmentManager({ rootDir, logger }),
-      agents: new AgentRuntime({ providers, config: config.agents, store, logger }),
       jobs,
       logger,
-      oracles: options.oracles ?? resolveOracles(config.oracles.enabled),
     });
+  }
+
+  get config(): Config {
+    return this.current;
+  }
+
+  get configPath(): string | undefined {
+    return this.currentPath;
+  }
+
+  get evidenceRoot(): string {
+    return this.currentEvidenceRoot;
+  }
+
+  get reportsDir(): string {
+    return this.currentReportsDir;
+  }
+
+  get agents(): AgentRuntime {
+    return this.currentAgents;
+  }
+
+  get oracles(): Oracle[] {
+    return this.currentOracles;
+  }
+
+  /**
+   * Re-read the configuration file and rewire what depends on it (targets, agents, oracles,
+   * directories). Used after setup wrote a config into a project that had none. The database
+   * stays the one this engine was opened with.
+   */
+  async reloadConfig(): Promise<void> {
+    const resolved = loadConfig({ cwd: this.rootDir });
+    this.current = resolved.config;
+    this.currentPath = resolved.path;
+    this.currentEvidenceRoot = resolved.resolvePath(resolved.config.evidenceDir);
+    this.currentReportsDir = resolved.resolvePath(resolved.config.reportsDir);
+    this.currentOracles = this.options.oracles ?? resolveOracles(resolved.config.oracles.enabled);
+    this.currentAgents = this.buildAgents(resolved.config);
+    for (const target of resolved.config.targets)
+      await this.store.targets.upsert(redactTarget(target));
+    this.logger.info(`Configuration reloaded from ${resolved.path}`);
   }
 
   /** All configured targets, or the named ones (throws on unknown ids). */
@@ -194,8 +228,6 @@ export class Engine {
         targetId: target.id,
         status: ['active', 'pending-review'] as Workflow['status'][],
       };
-      const total = await this.store.workflows.count(live);
-      const base = await this.store.workflows.count({ ...live, parentId: null });
       const bySeverity = {} as Record<Severity, number>;
       for (const severity of SeveritySchema.options) {
         bySeverity[severity] = await this.store.findings.count({
@@ -209,8 +241,8 @@ export class Engine {
         kind: target.kind,
         name: target.name,
         workflows: {
-          base,
-          mutations: total - base,
+          base: await this.store.workflows.count({ ...live, hasParent: false }),
+          mutations: await this.store.workflows.count({ ...live, hasParent: true }),
           pendingReview: await this.store.workflows.count({
             targetId: target.id,
             status: 'pending-review',
@@ -227,12 +259,13 @@ export class Engine {
       });
     }
     const models: Partial<Record<AgentRole, string>> = {};
+    const problems: string[] = [];
     if (this.agents.enabled) {
       for (const role of ROLES) {
         try {
           models[role] = this.agents.resolveModel(role).model;
-        } catch {
-          // Reported as missing; the error surfaces when the role is actually used.
+        } catch (error) {
+          problems.push(`${role}: ${errorMessage(error)}`);
         }
       }
     }
@@ -248,17 +281,21 @@ export class Engine {
         providers: this.providerIds(),
         maxParallel: this.config.agents.maxParallel,
         models,
+        problems,
       },
       usage: await this.store.usage.totals(),
       openQuestions: (await this.store.questions.list({ status: 'open' })).length,
     };
   }
 
-  /** Inspect the repository with agents and write the configuration and seed workflows. */
+  /**
+   * Inspect the repository with agents and write the configuration and seed workflows. When a
+   * config is created, the engine reloads it so the new targets are usable right away.
+   */
   async setup(options: SetupOptions & AgentHooks = {}): Promise<SetupResult> {
-    this.requireAgents('setup');
+    this.requireAgents('setup', 'inspector');
     const { jobId, signal, onEvent, ...rest } = options;
-    return setup(
+    const result = await setup(
       {
         store: this.store,
         runtime: this.agents,
@@ -274,6 +311,8 @@ export class Engine {
       },
       rest,
     );
+    if (result.configAction === 'created') await this.reloadConfig();
+    return result;
   }
 
   /** Discover new workflows with explorer agents against a freshly started environment. */
@@ -281,7 +320,7 @@ export class Engine {
     targetId: string,
     options: ExploreOptions & AgentHooks = {},
   ): Promise<ExploreResult> {
-    this.requireAgents('explore');
+    this.requireAgents('explore', 'explorer');
     const target = this.target(targetId);
     const adapter = await this.registry.forTarget(target);
     const { jobId, signal, onEvent, ...rest } = options;
@@ -307,6 +346,7 @@ export class Engine {
 
   /** Derive mutation variants of a target's base workflows. */
   async mutate(targetId: string, options: MutateOptions & AgentHooks = {}): Promise<MutateResult> {
+    if (options.agent) this.requireAgents('mutate --agent', 'mutator');
     const target = this.target(targetId);
     const adapter = await this.registry.forTarget(target);
     const { jobId, signal, onEvent, ...rest } = options;
@@ -350,7 +390,7 @@ export class Engine {
   async triage(
     options: { targetIds?: string[]; includeSkipped?: boolean } & AgentHooks = {},
   ): Promise<Finding[]> {
-    this.requireAgents('triage');
+    this.requireAgents('triage', 'triager');
     const updated: Finding[] = [];
     for (const target of this.targets(options.targetIds)) {
       const pending = await this.store.findings.list({
@@ -391,7 +431,8 @@ export class Engine {
 
   /**
    * Continuous mode: replay everything, mutate, and periodically explore, until aborted or the
-   * cycle limit is reached. Exploration only happens when a model provider is configured.
+   * cycle limit is reached. Exploration only happens when a model provider is configured. A
+   * failing cycle is reported and the loop carries on.
    */
   async watch(options: WatchOptions): Promise<{ cycles: number }> {
     const { continuous } = this.config.schedule;
@@ -402,30 +443,36 @@ export class Engine {
       cycle += 1;
       const exploreNow = this.agents.enabled && (cycle - 1) % continuous.exploreEveryCycles === 0;
       this.logger.info(`Cycle ${cycle}${exploreNow ? ' (with exploration)' : ''}`);
-      for (const target of targets) {
-        if (options.signal.aborted) break;
-        if (exploreNow) {
-          await this.explore(target.id, {
-            jobId: options.jobId,
-            signal: options.signal,
-            onEvent: options.onEvent,
-          }).catch((error: unknown) =>
-            this.logger.error(`Exploration of "${target.id}" failed: ${String(error)}`),
+      try {
+        for (const target of targets) {
+          if (options.signal.aborted) break;
+          if (exploreNow) {
+            await this.explore(target.id, {
+              jobId: options.jobId,
+              signal: options.signal,
+              onEvent: options.onEvent,
+            }).catch((error: unknown) =>
+              this.logger.error(`Exploration of "${target.id}" failed: ${errorMessage(error)}`),
+            );
+          }
+          await this.mutate(target.id, { jobId: options.jobId }).catch((error: unknown) =>
+            this.logger.error(`Mutation of "${target.id}" failed: ${errorMessage(error)}`),
           );
         }
-        await this.mutate(target.id, { jobId: options.jobId }).catch((error: unknown) =>
-          this.logger.error(`Mutation of "${target.id}" failed: ${String(error)}`),
-        );
+        if (options.signal.aborted) break;
+        const summary = await this.run({
+          targetIds: targets.map((t) => t.id),
+          trigger: 'continuous',
+          jobId: options.jobId,
+          signal: options.signal,
+          onEvent: options.onEvent,
+        });
+        options.onCycle?.(cycle, summary);
+      } catch (error) {
+        const message = errorMessage(error);
+        this.logger.error(`Cycle ${cycle} failed: ${message}`);
+        options.onCycle?.(cycle, undefined, message);
       }
-      if (options.signal.aborted) break;
-      const summary = await this.run({
-        targetIds: targets.map((t) => t.id),
-        trigger: 'continuous',
-        jobId: options.jobId,
-        signal: options.signal,
-        onEvent: options.onEvent,
-      });
-      options.onCycle?.(cycle, summary);
       if (max !== undefined && cycle >= max) break;
       await sleep(continuous.idleMs, options.signal);
     }
@@ -433,8 +480,9 @@ export class Engine {
   }
 
   /**
-   * Record the team's answer to a question. Confirming an observed behaviour activates its
-   * workflow; dismissing archives it; "bug" records a confirmed finding.
+   * Record the team's answer to a question. For a question about observed behaviour: confirm
+   * activates the workflow, dismiss archives it, bug records a confirmed finding. For a question
+   * about a finding: bug confirms it, confirm (the behaviour is intended) and dismiss close it.
    */
   async answerQuestion(
     id: string,
@@ -458,14 +506,20 @@ export class Engine {
       // A question about a finding decides that finding and leaves its workflow alone.
       const finding = await this.store.findings.get(question.context.findingId);
       if (finding) {
-        const isBug = decision !== 'dismiss';
+        const isBug = decision === 'bug';
         result.finding = FindingSchema.parse({
           ...finding,
           status: isBug ? 'confirmed' : 'dismissed',
           triage: {
             state: 'done',
             verdict: isBug ? 'bug' : 'not-a-bug',
-            rationale: answer ?? `Decided by the team (${decision})`,
+            rationale:
+              answer ??
+              (decision === 'confirm'
+                ? 'The team confirmed this behaviour is intended'
+                : decision === 'bug'
+                  ? 'Confirmed as a bug by the team'
+                  : 'Dismissed by the team'),
             at: now,
           },
         });
@@ -521,22 +575,6 @@ export class Engine {
     return result;
   }
 
-  /** Change a workflow's status and propagate it to its mutation variants. */
-  private async setWorkflowStatus(
-    workflow: Workflow,
-    status: WorkflowStatus,
-    at: string,
-  ): Promise<Workflow> {
-    const updated = WorkflowSchema.parse({ ...workflow, status, updatedAt: at });
-    await this.store.workflows.update(updated);
-    for (const variant of await this.store.workflows.list({ parentId: workflow.id })) {
-      await this.store.workflows.update(
-        WorkflowSchema.parse({ ...variant, status, updatedAt: at }),
-      );
-    }
-    return updated;
-  }
-
   async updateFinding(
     id: string,
     patch: { status?: FindingStatus; notes?: string },
@@ -565,6 +603,34 @@ export class Engine {
     await this.store.close();
   }
 
+  /** Change a workflow's status and propagate it to its mutation variants. */
+  private async setWorkflowStatus(
+    workflow: Workflow,
+    status: WorkflowStatus,
+    at: string,
+  ): Promise<Workflow> {
+    const updated = WorkflowSchema.parse({ ...workflow, status, updatedAt: at });
+    await this.store.workflows.update(updated);
+    for (const variant of await this.store.workflows.list({ parentId: workflow.id })) {
+      await this.store.workflows.update(
+        WorkflowSchema.parse({ ...variant, status, updatedAt: at }),
+      );
+    }
+    return updated;
+  }
+
+  private buildAgents(config: Config): AgentRuntime {
+    const providers =
+      this.options.providers ??
+      createProviders(config, { env: this.options.env, logger: this.logger });
+    return new AgentRuntime({
+      providers,
+      config: config.agents,
+      store: this.store,
+      logger: this.logger,
+    });
+  }
+
   private providerIds(): string[] {
     const ids: string[] = [];
     for (const role of ROLES) {
@@ -578,12 +644,15 @@ export class Engine {
     return ids;
   }
 
-  private requireAgents(action: string): void {
-    if (this.agents.enabled) return;
-    throw new MutationWorkflowError(
-      'PROVIDER_NOT_CONFIGURED',
-      `"${action}" needs a model provider. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add a providers section to the config.`,
-    );
+  /** Agent operations need a provider and a model for the role; fail early with guidance. */
+  private requireAgents(action: string, role: AgentRole): void {
+    if (!this.agents.enabled) {
+      throw new MutationWorkflowError(
+        'PROVIDER_NOT_CONFIGURED',
+        `"${action}" needs a model provider. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add a providers section to the config.`,
+      );
+    }
+    this.agents.resolveModel(role);
   }
 }
 

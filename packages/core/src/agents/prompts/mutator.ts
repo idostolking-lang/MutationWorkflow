@@ -41,7 +41,7 @@ ${JSON.stringify({ title: input.workflow.title, intent: input.workflow.intent, i
 Variants that already exist:
 ${input.existingVariantDescriptions.length > 0 ? input.existingVariantDescriptions.map((d) => `- ${d}`).join('\n') : '- none'}
 
-Each variant must be a complete step list using only the adapter's action vocabulary and locators that exist in the original workflow or follow from it. Keep expectations only when they should still hold after the change.
+Do not include step ids; they are assigned by position. Each variant must be a complete step list using only the adapter's action vocabulary and locators that exist in the original workflow or follow from it. Keep expectations only when they should still hold after the change.
 
 ${describeAdapter(input.adapter)}
 

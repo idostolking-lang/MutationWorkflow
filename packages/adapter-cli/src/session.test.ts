@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -186,6 +186,47 @@ describe('CliSession with examples/counter-cli', () => {
     ]);
     expect(await session.check({ type: 'running', expected: false })).toEqual({ passed: true });
     expect(session.drainSignals()).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'passes hostile args to a shell command as literal arguments',
+    async () => {
+      const marker = join(evidenceDir, 'pwned');
+      const hostile = [
+        `; touch ${marker}`,
+        `$(touch ${marker})`,
+        `\`touch ${marker}\``,
+        "it's",
+        '',
+        'a  b',
+        '$HOME',
+        '*',
+        '"quoted"',
+        '\\',
+      ];
+      const shelled = await openSession({
+        command: process.execPath,
+        args: ['-e', 'console.log(JSON.stringify(process.argv.slice(1)))', '--', 'config arg'],
+        shell: true,
+      });
+      const [exec] = await steps([{ type: 'exec', args: hostile }], shelled);
+      expect(exec).toMatchObject({ status: 'ok', message: 'The process exited with code 0' });
+      const log = await shelled.capture('output');
+      const printed = readFileSync(join(evidenceDir, log?.path ?? ''), 'utf8')
+        .split('\n')
+        .find((line) => line.startsWith('['));
+      expect(JSON.parse(printed ?? 'null')).toEqual(['config arg', ...hostile]);
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
+  it('reports no stderr signal for ordinary validation errors', async () => {
+    const rejecting = await openSession({
+      command: process.execPath,
+      args: ['-e', "console.error('error: invalid number'); process.exit(2)"],
+    });
+    await steps([{ type: 'start' }, { type: 'wait', output: 'never', ms: 2000 }], rejecting);
+    expect(rejecting.drainSignals().map((signal) => signal.kind)).toEqual(['process-exit']);
   });
 
   it('reports termination by a signal nobody sent as a crash', async () => {

@@ -29,6 +29,8 @@ export class PageMonitor {
   private signals: Signal[] = [];
   private readonly consoleLines: string[] = [];
   private readonly pending = new Set<Request>();
+  /** Requests the scope route aborted: the adapter's doing, not the application's. */
+  private readonly blocked = new WeakSet<Request>();
   private crashed = false;
 
   constructor(page: Page) {
@@ -60,6 +62,15 @@ export class PageMonitor {
     const drained = this.signals;
     this.signals = [];
     return drained;
+  }
+
+  /**
+   * Record that the scope route aborted a request, so its failure is logged as such and not
+   * reported as a `network-error` signal.
+   */
+  markBlocked(request: Request, reason: string): void {
+    this.blocked.add(request);
+    this.log(`[scope] blocked ${request.method()} ${request.url()}: ${reason}`);
   }
 
   /** The most recent console output, oldest first. */
@@ -95,6 +106,7 @@ export class PageMonitor {
 
   private onRequestFailed(request: Request): void {
     this.pending.delete(request);
+    if (this.blocked.has(request)) return;
     const failure = request.failure()?.errorText ?? 'unknown failure';
     if (ABORTED_REQUEST.test(failure)) return;
     const message = `${request.method()} ${request.url()} failed: ${failure}`;

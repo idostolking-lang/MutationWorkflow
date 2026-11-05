@@ -10,9 +10,12 @@ export function registerSetup(program: Command, cli: Cli): void {
     .description(
       'Let the inspector agent study the repository and write the config and seed workflows',
     )
-    .option('--no-validate', 'do not start each proposed environment to check its start command')
+    .option(
+      '--validate',
+      'start each proposed environment once to check its start command (off by default: the commands were written by a model, review them first)',
+    )
     .option('--name <name>', 'project name (default: the directory name)')
-    .action((options: { validate: boolean; name?: string }) =>
+    .action((options: { validate?: boolean; name?: string }) =>
       cli.withEngine(
         async (engine) => {
           requireAgents(engine, 'setup');

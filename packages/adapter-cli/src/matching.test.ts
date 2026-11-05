@@ -27,12 +27,26 @@ describe('endsWithPrompt', () => {
 });
 
 describe('error heuristics', () => {
-  it('recognises error words and stack frames', () => {
+  it('recognises exception classes, crash words and stack frames', () => {
     expect(isErrorLine('TypeError: x is undefined')).toBe(true);
+    expect(isErrorLine('Exception in thread "main" java.lang.NullPointerException')).toBe(true);
     expect(isErrorLine('Traceback (most recent call last):')).toBe(true);
+    expect(isErrorLine('panic: runtime error: index out of range [3]')).toBe(true);
+    expect(isErrorLine('fatal: unable to read config')).toBe(true);
+    expect(isErrorLine('Unhandled promise rejection')).toBe(true);
+    expect(isErrorLine('Segmentation fault (core dumped)')).toBe(true);
     expect(isErrorLine('    at run (file:///app/cli.js:52:30)')).toBe(true);
     expect(isErrorLine('    at file:///app/cli.js:125:3')).toBe(true);
+    expect(isErrorLine('\tat com.example.App.main(App.java:12)')).toBe(true);
+    expect(isErrorLine('  File "app.py", line 3, in <module>')).toBe(true);
+  });
+
+  it('ignores ordinary diagnostics', () => {
+    expect(isErrorLine('error: invalid number')).toBe(false);
+    expect(isErrorLine('Error: missing argument <name>')).toBe(false);
+    expect(isErrorLine('ERROR: unknown command "bogus"')).toBe(false);
     expect(isErrorLine('warning: deprecated flag')).toBe(false);
+    expect(isErrorLine('usage: app [options]')).toBe(false);
     expect(isErrorLine('terrors are not errors')).toBe(false);
   });
 
@@ -46,6 +60,8 @@ describe('error heuristics', () => {
       "TypeError: Cannot read properties of null (reading 'value')",
     );
     expect(errorHeadline(lines.slice(0, 2))).toBe('at run (file:///app/cli.js:52:30)');
+    expect(errorHeadline(['goroutine 1 [running]:', 'panic: boom'])).toBe('panic: boom');
     expect(errorHeadline(['all good'])).toBeUndefined();
+    expect(errorHeadline(['error: invalid number', 'usage: app <n>'])).toBeUndefined();
   });
 });

@@ -24,6 +24,11 @@ All relative paths in the file (the store, evidence and reports directories, `cw
 must be unique. Validation errors are reported with the failing path and stop the command
 (`CONFIG_INVALID`); a missing file is `CONFIG_NOT_FOUND`.
 
+`mw setup` writes `mutationworkflow.config.yaml` only when no config exists; it re-checks the disk
+right before writing, so a second setup never overwrites one and instead writes
+`.mutationworkflow/setup-proposal.yaml` for you to merge by hand. After creating a config the
+engine reloads it, so a running MCP server can use the new targets without a restart.
+
 ## Environment variable interpolation
 
 Any string value may reference environment variables, so secrets and machine-specific values
@@ -155,15 +160,29 @@ Without a `providers` section, providers are inferred from `ANTHROPIC_API_KEY` a
 | `invariants`  | array  | `[]`       | Checks that must hold after any workflow                                     |
 | `scope`       | object | see below  | Boundaries for agents and replays                                            |
 
-Adapter options are documented in [Adapters](adapters.md): `baseUrl`, `browser`, `headless`,
-`viewport`, `launchOptions`, `storageStatePath` for `web`; `command`, `args`, `cwd`, `env`,
-`shell`, `promptPattern`, `exitTimeoutMs` for `cli`.
+Adapter options are documented in [Adapters](adapters.md): `baseUrl`, `allowRemoteBaseUrl`,
+`browser`, `headless`, `viewport`, `launchOptions`, `storageStatePath` for `web`; `command`,
+`args`, `cwd`, `env`, `shell`, `promptPattern`, `exitTimeoutMs` for `cli`. Two rules matter when
+writing them:
+
+- `web`: `baseUrl` must be a loopback host (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`).
+  Any other host is rejected with `CONFIG_INVALID` unless `allowRemoteBaseUrl: true` is set, which
+  is meant only for a local instance reached under another name (a container or VM on your
+  machine), never a shared or production environment.
+- `cli`: with `shell: true` the `command` string goes to the shell as written, but on POSIX every
+  configured and per-action argument is single-quoted, so arguments are always literal data. On
+  Windows with `shell: true`, `start`/`exec` actions with per-action `args` are rejected.
+
+The stored copy of a target (the `targets` table) and what agents see leave out identity steps
+and the `env`, `launchOptions` and `storageStatePath` options; see [Memory](memory.md#tables).
 
 ### `targets[].environment`
 
 MutationWorkflow only tests an application it started itself, or one already running on
-localhost. Each replay, exploration and setup validation starts the environment, waits for it,
-and stops it (with its whole process group) at the end.
+localhost. Each replay and exploration starts the environment, waits for it, and stops it (with
+its whole process group) at the end. Setup starts proposed environments only when asked to
+validate them (`mw setup --validate`, or `validate: true` over MCP), only for a config it just
+created, and logs each start command first, since a model wrote it.
 
 | Field                    | Type                               | Default   | Meaning                                                           |
 | ------------------------ | ---------------------------------- | --------- | ----------------------------------------------------------------- |
@@ -352,7 +371,7 @@ the config file:
   evidence/runs/<runId>/    # evidence of each replay
   evidence/explore/<sessionId>/  # evidence of each explorer session
   reports/                  # <timestamp>-run.md reports
-  setup-proposal.yaml       # written by setup when a config already exists
+  setup-proposal.yaml       # setup's proposal when a config already exists
 ```
 
 Add `.mutationworkflow/` to `.gitignore`. See [Memory](memory.md) for backups and cleanup.

@@ -66,7 +66,7 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
           .boolean()
           .optional()
           .describe(
-            'Start each proposed environment once to check its start command (default true)',
+            'Start each proposed environment once to check its start command (default false: the commands were written by a model, review them first)',
           ),
         wait,
       },

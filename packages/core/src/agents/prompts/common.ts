@@ -9,11 +9,25 @@ export const SAFETY_RULES = `Rules that always apply:
 - Prefer tools over guesses. Read before you conclude; observe before you act.
 - Be precise and concise in everything you write; it will be stored and read by engineers.`;
 
+const SAFE_OPTION_KEYS = new Set([
+  'baseUrl',
+  'command',
+  'args',
+  'cwd',
+  'promptPattern',
+  'browser',
+  'headless',
+  'viewport',
+]);
+
 export function describeTarget(target: TargetConfig): string {
   const lines = [`Target "${target.id}" (${target.kind})${target.name ? `: ${target.name}` : ''}`];
   if (target.description) lines.push(target.description);
-  if (Object.keys(target.options).length > 0)
-    lines.push(`Options: ${JSON.stringify(target.options)}`);
+  // Only options that describe the application; env maps and launch options may hold secrets.
+  const shown = Object.fromEntries(
+    Object.entries(target.options).filter(([key]) => SAFE_OPTION_KEYS.has(key)),
+  );
+  if (Object.keys(shown).length > 0) lines.push(`Options: ${JSON.stringify(shown)}`);
   if (target.identities.length > 0) {
     lines.push(
       `Identities: ${target.identities.map((i) => `${i.id}${i.description ? ` (${i.description})` : ''}`).join(', ')}`,

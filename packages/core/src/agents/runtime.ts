@@ -170,7 +170,7 @@ export class AgentRuntime {
             this.run({
               role: parent.role,
               system: parent.system,
-              task: item.task,
+              task: `${item.task}\n\nYou are a sub-agent without a finish tool: report your results as plain text in your final message.`,
               tools: parent.tools,
               jobId: parent.jobId,
               depth: parent.depth + 1,
@@ -270,6 +270,7 @@ export class AgentRuntime {
 
       let response: Awaited<ReturnType<ModelProvider['complete']>>;
       try {
+        pruneImages(messages);
         response = await this.slots.use(() =>
           resolved.provider.complete({
             model: resolved.model,
@@ -511,3 +512,35 @@ function normalizeToolOutput(output: ToolOutput): Array<TextPart | ImagePart> {
 }
 
 export type { ContentPart };
+
+const MAX_IMAGES_IN_CONTEXT = 2;
+const OMITTED_IMAGE: TextPart = {
+  type: 'text',
+  text: '[earlier screenshot omitted to save context]',
+};
+
+/**
+ * Keep only the latest screenshots in the conversation. Observations attach an image per turn,
+ * which would otherwise grow the request superlinearly and hit provider image limits.
+ */
+function pruneImages(messages: AgentMessage[]): void {
+  let kept = 0;
+  for (let m = messages.length - 1; m >= 0; m--) {
+    const content = messages[m]?.content;
+    if (!content) continue;
+    for (let p = content.length - 1; p >= 0; p--) {
+      const part = content[p];
+      if (part?.type === 'image') {
+        kept += 1;
+        if (kept > MAX_IMAGES_IN_CONTEXT) content[p] = OMITTED_IMAGE;
+      } else if (part?.type === 'tool_result') {
+        for (let i = part.content.length - 1; i >= 0; i--) {
+          if (part.content[i]?.type === 'image') {
+            kept += 1;
+            if (kept > MAX_IMAGES_IN_CONTEXT) part.content[i] = OMITTED_IMAGE;
+          }
+        }
+      }
+    }
+  }
+}

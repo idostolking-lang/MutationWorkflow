@@ -66,11 +66,13 @@ export class WebAdapter implements Adapter {
     const browser = await this.launch();
     const context = await browser.newContext({
       viewport: this.options.viewport,
+      // Service worker requests bypass context routes, and with them the scope checks.
+      serviceWorkers: 'block',
       ...(this.storageState === undefined ? {} : { storageState: this.storageState }),
     });
     try {
       const page = await context.newPage();
-      return new WebSession(context, page, this.options.baseUrl, options);
+      return await WebSession.start(context, page, this.options.baseUrl, options);
     } catch (error) {
       await context.close();
       throw error;

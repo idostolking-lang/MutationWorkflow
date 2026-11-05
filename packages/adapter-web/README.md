@@ -22,17 +22,44 @@ targets:
       denyText: ["delete account", "log ?out"]
 ```
 
-| Option             | Default                        | Meaning                                                             |
-| ------------------ | ------------------------------ | ------------------------------------------------------------------- |
-| `baseUrl`          | required                       | Root http(s) URL of the application                                 |
-| `browser`          | `chromium`                     | `chromium`, `firefox` or `webkit`                                   |
-| `headless`         | `true`                         | Run without a window                                                |
-| `viewport`         | `{ width: 1280, height: 800 }` | Viewport in CSS pixels                                              |
-| `launchOptions`    | `{}`                           | Passed unchanged to Playwright's `browserType.launch()`             |
-| `storageStatePath` | none                           | Storage state file (relative to the project root) for every session |
+| Option               | Default                        | Meaning                                                             |
+| -------------------- | ------------------------------ | ------------------------------------------------------------------- |
+| `baseUrl`            | required                       | Root http(s) URL of the application; must be a loopback host        |
+| `allowRemoteBaseUrl` | `false`                        | Allow a `baseUrl` that is not loopback (see below)                  |
+| `browser`            | `chromium`                     | `chromium`, `firefox` or `webkit`                                   |
+| `headless`           | `true`                         | Run without a window                                                |
+| `viewport`           | `{ width: 1280, height: 800 }` | Viewport in CSS pixels                                              |
+| `launchOptions`      | `{}`                           | Passed unchanged to Playwright's `browserType.launch()`             |
+| `storageStatePath`   | none                           | Storage state file (relative to the project root) for every session |
 
 One browser is launched lazily per adapter; every session gets its own isolated browser context
 and page, which start on `about:blank`.
+
+`baseUrl` must point at a loopback host: `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]`.
+Anything else is rejected with `CONFIG_INVALID` unless `allowRemoteBaseUrl: true` is set. Set it
+only for a local instance you started that is reached under another host name (a container or
+VM on your machine); never point it at a shared or production environment.
+
+### Scope enforcement
+
+The target's `scope` is enforced inside the browser, before requests leave it. A route on every
+session's browser context aborts:
+
+- every navigation (of the page, an iframe or a popup) whose URL is out of scope, and
+- every request with a method other than `GET` or `HEAD` whose URL is out of scope, since those
+  can have side effects.
+
+"In scope" means matching `scope.allowUrls` (when empty: the `baseUrl` origin followed by `/**`)
+and not matching `scope.denyUrls`. Out-of-scope `GET` subresources (fonts, scripts or images from
+a CDN) still load, so local applications keep working. Aborted requests are logged with the
+console evidence and are not reported as `network-error` signals. Service workers are blocked,
+because their requests would bypass the route. As a backstop the page URL is still checked after
+every action (redirects are not re-routed), and a page that ended up out of scope is left with
+`back`.
+
+Workflows run in a single tab. Pages the application opens (`target="_blank"`, `window.open`)
+never load: they are closed at once, and the next action outcome says so ("popup to <url>
+closed"). The workflow continues in the original page.
 
 ## Locators
 
@@ -72,9 +99,11 @@ Outcomes:
 
 - `ok`: the action was performed.
 - `blocked`: the element was missing, hidden, disabled or ambiguous within `stepTimeoutMs`; the
-  control's text, aria-label or value matched `scope.denyText` (click, dblclick, press on a
-  target, check); or the URL is outside the scope. Navigations out of scope caused by an action
-  are undone with `back`.
+  control's text, aria-label or value matched `scope.denyText`; or the URL is outside the scope.
+  The denyText guard covers `click`, `dblclick`, `check`, `uncheck`, `press` (on its target, or
+  without one on the focused element), and `select` (the chosen option's label and value and
+  the select's aria-label). A navigation out of scope caused by an action is aborted before it
+  leaves the browser, and the message names its URL.
 - `error`: the page crashed, a navigation failed or timed out, or Playwright failed unexpectedly.
 
 After every action the adapter waits until no request has been in flight for 100 ms (at most

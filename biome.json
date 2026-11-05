@@ -25,7 +25,8 @@
           "options": {
             "allow": ["error", "warn"]
           }
-        }
+        },
+        "noTemplateCurlyInString": "off"
       },
       "style": {
         "noNonNullAssertion": "error",

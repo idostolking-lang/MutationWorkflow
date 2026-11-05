@@ -65,3 +65,52 @@ export function urlMatches(url: string, pattern: string): boolean {
   const parsed = new URL(url);
   return matchesAnyGlob(`${parsed.pathname}${parsed.search}`, [pattern]);
 }
+
+/** The parts of a browser request the scope route decides on. */
+export interface ScopedRequest {
+  url: string;
+  method: string;
+  /** True for document loads of a frame, including popups and iframes. */
+  isNavigation: boolean;
+}
+
+/** Methods without side effects; anything else (POST, PUT, PATCH, DELETE, …) may change state. */
+const SAFE_METHODS = new Set(['GET', 'HEAD']);
+
+/**
+ * Why a request must be aborted before it leaves the browser, or `undefined` when it may
+ * continue. Navigations and state-changing requests (any method but GET and HEAD) must stay in
+ * scope; other GET subresources (fonts, scripts from a CDN) may load from anywhere so local
+ * applications keep working.
+ */
+export function requestBlockReason(
+  request: ScopedRequest,
+  scope: Scope,
+  baseUrl: string,
+): string | undefined {
+  const method = request.method.toUpperCase();
+  if (!request.isNavigation && SAFE_METHODS.has(method)) return undefined;
+  if (!/^https?:/i.test(request.url)) {
+    // Navigations to data:, blob: or other schemes never reach the network; still keep the
+    // tab on the application.
+    return request.isNavigation ? `${request.url} is not an http(s) URL` : undefined;
+  }
+  return outOfScopeReason(request.url, scope, baseUrl);
+}
+
+/**
+ * True when a URL's host is a loopback address: `localhost`, `*.localhost`, `127.0.0.0/8` or
+ * `[::1]`. Other spellings of the same addresses are normalised by the URL parser first.
+ */
+export function isLoopbackUrl(url: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, '');
+  } catch {
+    return false;
+  }
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) return true;
+  if (hostname === '[::1]') return true;
+  const octets = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostname);
+  return octets?.slice(1).every((octet) => Number(octet) <= 255) ?? false;
+}

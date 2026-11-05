@@ -47,7 +47,10 @@ export const dataFuzzOperator: MutationOperator = {
           variants.push({
             titleSuffix: `fuzz step ${index + 1} with ${label}`,
             description: `Enters ${label} as "${input.field}" in step ${index + 1} (${step.action.type}); the app should validate it or handle it, never crash`,
-            steps: steps.map((original, i) => (i === index ? fuzzed : original)),
+            // Later expectations may legitimately differ once the data changed; keep earlier ones.
+            steps: steps.map((original, i) =>
+              i === index ? fuzzed : i > index ? { ...original, expect: [] } : original,
+            ),
             expect: [],
             params: { index, value },
           });

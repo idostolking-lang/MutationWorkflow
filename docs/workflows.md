@@ -34,10 +34,14 @@ A step:
 
 | Field    | Type        | Meaning                                                               |
 | -------- | ----------- | --------------------------------------------------------------------- |
-| `id`     | string      | Assigned as `s1`, `s2`, ... when missing; existing ids are kept       |
+| `id`     | string      | `s1`, `s2`, ... by position when missing; see below                  |
 | `action` | object      | `{ "type": ..., ...parameters }` from the adapter's action vocabulary |
 | `note`   | string      | Why a user performs this step, in their terms                         |
 | `expect` | assertion[] | Checked immediately after the action                                  |
+
+Existing step ids are kept when they are unique. If any two steps share an id (typically a
+model copied a step together with its id), every step gets a positional id instead, so ids stay
+unambiguous. Mutation variants, including agent-proposed ones, always get positional ids.
 
 Actions and assertions are adapter-specific objects with a `type` and parameters; assertions may
 also carry a `description`, which is used in findings. The full vocabularies are in
@@ -137,7 +141,8 @@ when the workflow is stored.
 Every action and assertion is validated against the target's adapter before a seed or
 mutation is stored; invalid ones are skipped with a warning. Explorers record only actions that
 succeeded (`ok`), so a discovered workflow is a sequence the application actually accepted.
-Explorer-saved expectations are assertions the agent verified with `check` before saving.
+When an explorer saves a workflow, each proposed final expectation is checked against the live
+state first; expectations that do not hold are dropped (and the agent is told which).
 
 ## How a workflow is replayed
 
@@ -145,7 +150,8 @@ Each replay is a run. Runs happen in a freshly started environment (one per `run
 target), with up to `execution.parallel` workflows at a time. For each workflow:
 
 1. A fresh adapter session opens: a new browser context on `about:blank`, or a session with
-   no process yet. Nothing is shared between runs.
+   no process yet. Nothing is shared between runs. If the session cannot open, the run is
+   recorded as `error`.
 2. If the workflow has an `identity`, its steps run first. Any outcome other than `ok` aborts
    the run with status `error`.
 3. Each step: the action is performed. If it is `ok`, the step's `expect` assertions are
@@ -160,9 +166,15 @@ target), with up to `execution.parallel` workflows at a time. For each workflow:
 7. The oracles judge the run, and failing oracle results become findings
    ([Oracles](oracles.md)).
 
-`workflowTimeoutMs` is checked between steps; when exceeded, the remaining steps are skipped
-and the run is an `error`. A single action is bounded by `stepTimeoutMs`, and each assertion
-retries for up to `assertionTimeoutMs`.
+`workflowTimeoutMs` bounds the whole run: opening the session, identity setup, and every action
+and assertion are each limited to the time that remains, so a hanging adapter call becomes a
+step `error` instead of a stuck run. When the budget is used up, the remaining steps are skipped
+and the run is an `error`. Within that, a single action is bounded by `stepTimeoutMs`, and each
+assertion retries for up to `assertionTimeoutMs`.
+
+One workflow that cannot be run or recorded does not stop the others: the run command collects
+such problems (and environment or triage failures) in its `errors` list and still writes the
+report.
 
 Which workflows run: all `active` and `pending-review` workflows of the selected targets, or
 only base workflows, or only mutations, or specific ids.
@@ -216,4 +228,8 @@ per item (`ev_...`, kind, label, step, path relative to the evidence directory, 
 | `stdout`, `stderr` |                                                                                                     | Output tails with every non-`ok` action |
 | `log`              |                                                                                                     | Full transcript on request              |
 
-Findings reference the evidence of the failing step plus the last screenshots of the run.
+When a run is troubled (a step did not pass, an assertion failed or the application emitted a
+signal) and screenshots are not `never`, a `final-state` screenshot is captured before the
+session closes, because expectation and signal failures leave no failed action with its own
+screenshot. Findings reference the evidence of the failing step plus the last screenshots of the
+run.

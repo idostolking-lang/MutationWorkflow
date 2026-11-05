@@ -133,9 +133,12 @@ Triage is the review of automatically detected findings.
 | `skipped`      | No model provider was configured when the finding was created  |
 
 After each `run`, the findings it created or updated that are still `pending` are triaged per
-target, in batches of 8. The triager receives a dossier per finding (detector, severity guess,
-occurrences, the workflow with every step's outcome, the mutation, failed expectations, error
-signals, evidence ids) and can call `get_evidence` (screenshots as images when vision is on),
+target, in batches of 8. The triager receives a dossier per finding: detector, severity guess,
+occurrences, the workflow with its origin and status (a `pending-review` workflow's expectations
+were written by an agent and nobody confirmed them; an `imported-test` one encodes confirmed
+intent), every step's outcome, the mutation, for a variant the base workflow's latest run result
+(if the unmodified sequence passes, the variant is compared against it), failed expectations,
+error signals and evidence ids. It can call `get_evidence` (screenshots as images when vision is on),
 `get_run` and `get_workflow`. It returns one decision per finding:
 
 | Verdict       | Effect                                                                  |
@@ -145,11 +148,19 @@ signals, evidence ids) and can call `get_evidence` (screenshots as images when v
 | `needs-human` | Same, and an `is-this-a-bug` question is created                        |
 
 `duplicateOf: <finding id>` dismisses the finding with a note "Duplicate of <id>." and merges
-its run ids, workflow ids and occurrences into the primary. Findings the triager leaves out stay
-`pending`; if the agent fails or runs out of budget, the whole batch stays `pending`.
+its run ids, workflow ids and occurrences into the primary. It is honoured only when the primary
+is another existing finding of the same target, is `open` or `confirmed`, and is not itself
+marked as a duplicate in the same batch; otherwise (an invented id, a cycle, a dismissed primary)
+it is ignored with a warning and the verdict applies on its own, so a real bug is never dismissed
+on a typo. Each finding is re-read before its decision is applied, so occurrences that a
+concurrent run added are kept.
 
-Without a model provider, pending findings from a run are marked `skipped` so they do not look
-stuck. Once a provider is configured, `mw triage --include-skipped` ([CLI](cli.md)) revisits them
+Findings the triager leaves out stay `pending`. If the agent fails, runs out of budget, or the
+model call errors (rate limits, network), the batch stays `pending`, the run carries on, and the
+failure is listed in the run's `errors`.
+
+Without a model provider, or without a model for the `triager` role, pending findings from a run
+are marked `skipped` so they do not look stuck. Once a provider is configured, `mw triage --include-skipped` ([CLI](cli.md)) revisits them
 along with pending ones; only `open` findings are considered.
 
 The triager's rules of thumb: a crash, unhandled exception, server error or corrupted state is
@@ -168,17 +179,20 @@ Questions record what only the team can answer. Each has a `kind`, the question 
 | `setup`             | Questions in the inspector's report; a start command that did not come up during setup validation |
 
 Answering takes a decision (`confirm`, `bug` or `dismiss`) and optional text, and marks the
-question `answered`. Effects:
+question `answered`. `confirm` always means "this behaviour is intended", `bug` means "the
+application misbehaved", `dismiss` means "ignore it". Effects:
 
 | Question references             | `confirm`                                              | `bug`                                                                                                                         | `dismiss`                                               |
 | ------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| A finding                       | Finding `confirmed`, verdict `bug`                     | Finding `confirmed`, verdict `bug`                                                                                            | Finding `dismissed`, verdict `not-a-bug`                |
+| A finding                       | Finding `dismissed`, verdict `not-a-bug`               | Finding `confirmed`, verdict `bug`                                                                                            | Finding `dismissed`, verdict `not-a-bug`                |
 | A workflow (no finding)         | If `pending-review`: workflow and its variants `active` | New finding: `confirmed`, severity `medium`, `detectedBy: human`, verdict `bug`, titled `Unexpected behaviour in "<title>"`; workflow unchanged | If `pending-review`: workflow and its variants `archived` |
 
 A question that references a finding decides only the finding, even when it also names the
-reproduction workflow (as triage questions do): `confirm` and `bug` both mean "it is a bug",
-`dismiss` means "not a bug", and the workflow's status never changes. The answer text becomes the
-triage rationale.
+reproduction workflow (as `is-this-a-bug` questions from triage do): only `bug` confirms the
+finding; `confirm` (intended behaviour) and `dismiss` both dismiss it with verdict `not-a-bug`; the
+workflow's status never changes. The question text the triager writes ends with these three
+choices spelled out. The answer text, or a default such as "The team confirmed this behaviour is
+intended", becomes the triage rationale.
 
 ## Reports
 
@@ -223,3 +237,12 @@ Mutation: Performs step 4 (click) before step 3 (click); ...
 Sections: summary counts, model usage for the job (when any), each finding created or updated
 by the run (severity, status, detector, occurrences, triage verdict and rationale, summary,
 reproduction steps, evidence count), and one row per run.
+
+### Errors that do not stop a run
+
+A run command does not abort when one part fails. A workflow that cannot be executed or
+recorded, a target whose adapter or environment cannot start, a failed triage call, and a report
+that cannot be written are each logged and collected in the run summary's `errors` list
+(`RunSummary.errors`), and the remaining workflows and targets still run. The report is written
+for whatever ran. Session and identity failures inside a workflow are not in `errors`: they are
+recorded as runs with status `error` (see [Workflows](workflows.md#run-status)).
