@@ -1,0 +1,44 @@
+{
+  "name": "@mutationworkflow/adapter-web",
+  "version": "0.1.0",
+  "description": "Playwright adapter for MutationWorkflow: drives web applications and collects screenshots, console and network evidence.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run --project unit"
+  },
+  "dependencies": {
+    "@mutationworkflow/core": "workspace:*",
+    "zod": "^4.6.7"
+  },
+  "peerDependencies": {
+    "playwright": ">=1.49.0"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/idostolking-lang/MutationWorkflow.git",
+    "directory": "packages/adapter-web"
+  },
+  "keywords": [
+    "testing",
+    "playwright",
+    "mutationworkflow"
+  ]
+}
