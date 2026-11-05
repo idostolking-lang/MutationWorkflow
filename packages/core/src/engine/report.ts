@@ -198,7 +198,7 @@ function screenshotsFor(finding: Finding, input: ReportInput): { label: string; 
   const shots: { label: string; path: string }[] = [];
   for (const id of finding.evidenceIds) {
     const item = input.evidence.get(id);
-    if (!item || item.kind !== 'screenshot' || !item.path) continue;
+    if (item?.kind !== 'screenshot' || !item.path) continue;
     const absolute = join(input.evidenceRoot, item.path);
     const path = input.reportsDir ? relative(input.reportsDir, absolute) : absolute;
     shots.push({ label: item.label ?? 'screenshot', path: path.split(sep).join('/') });

@@ -41,6 +41,7 @@ const TOOLS = [
   'mw_report',
   'mw_evidence',
   'mw_run_detail',
+  'mw_impact',
   'mw_inspect_brief',
   'mw_inspect_apply',
   'mw_explore_open',
@@ -101,22 +102,33 @@ function json(result: CallToolResult): unknown {
   return JSON.parse(body.slice(body.lastIndexOf('\n\n') + 2));
 }
 
-async function insertWorkflow(status: 'active' | 'pending-review' = 'active') {
-  const workflow = createWorkflow(
+async function insertWorkflow(
+  status: 'active' | 'pending-review' = 'active',
+  touches?: { urls: string[]; endpoints: string[]; files: string[] },
+  button = 'Add',
+) {
+  const created = createWorkflow(
     'web',
     {
       title: 'Add a todo',
       intent: 'Add an item to the list',
       steps: [
         { action: { type: 'navigate', url: '/' } },
-        { action: { type: 'click', target: { role: 'button', name: 'Add' } } },
+        { action: { type: 'click', target: { role: 'button', name: button } } },
       ],
     },
     { origin: 'discovered', status },
   );
+  const workflow = touches ? { ...created, touches: { ...touches, updatedAt: nowIso() } } : created;
   await engine.store.workflows.insert(workflow);
   return workflow;
 }
+
+const TODO_TOUCHES = {
+  urls: ['/'],
+  endpoints: ['POST /api/todos'],
+  files: ['server.js', 'src/todos/**'],
+};
 
 describe('MCP server', () => {
   it('lists every tool with annotations', async () => {
@@ -224,6 +236,60 @@ describe('MCP server', () => {
     const badTarget = await call('mw_run', { targets: ['nope'] });
     expect(badTarget.isError).toBe(true);
     expect(text(badTarget)).toContain('Unknown target "nope"');
+  });
+
+  it('reports what a change affects', async () => {
+    const known = await insertWorkflow('active', TODO_TOUCHES);
+    const fresh = await insertWorkflow('pending-review', undefined, 'Clear');
+
+    const backend = await call('mw_impact', { files: ['src/todos/store.ts'] });
+    expect(backend.isError).toBeFalsy();
+    expect(text(backend)).toContain('Changed files (1)');
+    expect(text(backend)).toContain(`  ${known.id}  Add a todo`);
+    expect(json(backend)).toMatchObject({
+      changedFiles: ['src/todos/store.ts'],
+      targets: [
+        {
+          targetId: 'web',
+          sharedChange: false,
+          impacted: [{ id: known.id, touches: { endpoints: ['POST /api/todos'] } }],
+          unknown: [{ id: fresh.id }],
+          unaffected: [],
+        },
+      ],
+    });
+
+    const docs = json(await call('mw_impact', { files: ['README.md'], targets: ['web'] }));
+    expect(docs).toMatchObject({ targets: [{ impacted: [], unaffected: [{ id: known.id }] }] });
+
+    const shared = await call('mw_impact', { files: ['package.json'] });
+    expect(text(shared)).toContain('A shared file changed');
+
+    const detail = await call('mw_workflow', { id: known.id });
+    expect(text(detail)).toContain('endpoints: POST /api/todos');
+    expect(text(detail)).toContain('files: server.js, src/todos/**');
+  });
+
+  it('replays only what changed files affect', async () => {
+    await insertWorkflow('active', TODO_TOUCHES);
+    const result = await call('mw_run', { changedFiles: ['README.md'], wait: true });
+    expect(result.isError).toBeFalsy();
+    expect(text(result)).toContain(
+      'Change (1 file): web → 0 workflows affected, 0 never run, 1 skipped',
+    );
+    expect(json(result)).toMatchObject({
+      stats: { total: 0 },
+      selection: [
+        {
+          targetId: 'web',
+          changedFiles: 1,
+          impacted: 0,
+          unknown: 0,
+          skipped: 1,
+          everything: false,
+        },
+      ],
+    });
   });
 
   it('runs deterministic mutation directly', async () => {

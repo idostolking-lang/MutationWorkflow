@@ -6,10 +6,12 @@ import {
   type AgentEvent,
   describeAction,
   type Finding,
+  type ImpactReport,
   type Job,
   type Question,
   type Run,
   type RunSummary,
+  type SelectionSummary,
   type SetupResult,
   type StatusSummary,
   type UsageTotals,
@@ -45,6 +47,33 @@ export function table(headers: ReadonlyArray<string>, rows: ReadonlyArray<Readon
 export function oneLine(text: string, max = 80): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+}
+
+/** `1 file`, `3 files`: a count with its noun, `s` added unless it is one. */
+export function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/** `a, b, c`, cut after `max` items with `… and N more`. */
+export function listText(items: ReadonlyArray<string>, max = 20): string {
+  const shown = items.slice(0, max).join(', ');
+  return items.length > max ? `${shown}, … and ${items.length - max} more` : shown;
+}
+
+/** Indented `label: a, b` lines for the non-empty lists of a footprint. */
+function footprintLines(footprint: {
+  urls: ReadonlyArray<string>;
+  endpoints: ReadonlyArray<string>;
+  files?: ReadonlyArray<string>;
+}): string[] {
+  const lists: Array<[string, ReadonlyArray<string>]> = [
+    ['pages', footprint.urls],
+    ['endpoints', footprint.endpoints],
+    ['files', footprint.files ?? []],
+  ];
+  return lists
+    .filter(([, items]) => items.length > 0)
+    .map(([label, items]) => `  ${label}: ${listText(items)}`);
 }
 
 /** 950 → "950", 12_345 → "12.3k", 4_200_000 → "4.2M". */
@@ -216,6 +245,10 @@ export function formatWorkflowDetail(detail: WorkflowDetail): string {
   if (w.expect.length > 0) {
     lines.push('', 'Final expectations:', ...w.expect.map((a) => `  - ${describeAction(a)}`));
   }
+  const touches = w.touches ? footprintLines(w.touches) : [];
+  if (w.touches && touches.length > 0) {
+    lines.push('', `Touches (learned ${w.touches.updatedAt}):`, ...touches);
+  }
   if (detail.lastRun) {
     const run = detail.lastRun;
     lines.push(
@@ -334,6 +367,8 @@ export function formatRunDetail(run: Run): string {
       lines.push(`  - ${oracle.oracle} ${oracle.verdict}${severity}${summary}`);
     }
   }
+  const touched = footprintLines(run.touched);
+  if (touched.length > 0) lines.push('', 'Touched:', ...touched);
   if (run.evidenceIds.length > 0) lines.push('', `Evidence: ${run.evidenceIds.join(', ')}`);
   return lines.join('\n');
 }
@@ -356,6 +391,9 @@ export function formatRunSummary(summary: RunSummary): string {
     ),
     '',
   ];
+  if (summary.selection && summary.selection.length > 0) {
+    lines.push(...summary.selection.map(formatSelection), '');
+  }
   if (summary.findings.length > 0) {
     lines.push(
       `Findings created or updated (${summary.findings.length}):`,
@@ -365,6 +403,53 @@ export function formatRunSummary(summary: RunSummary): string {
     lines.push('No new or updated findings.');
   }
   if (summary.reportPath) lines.push('', `Report: ${summary.reportPath}`);
+  return lines.join('\n');
+}
+
+/**
+ * How a change narrowed one target's run, e.g.
+ * `Change (3 files): app → 2 workflows affected, 1 never run, 5 skipped`.
+ */
+export function formatSelection(selection: SelectionSummary): string {
+  const head = `Change (${plural(selection.changedFiles, 'file')}): ${selection.targetId} →`;
+  if (selection.everything) return `${head} every workflow replayed`;
+  return `${head} ${plural(selection.impacted, 'workflow')} affected, ${selection.unknown} never run, ${selection.skipped} skipped`;
+}
+
+const MAX_IMPACT_FILES = 20;
+
+/** What a change affects: the changed files, then per target the counts and affected workflows. */
+export function formatImpact(report: ImpactReport): string {
+  const files = report.changedFiles;
+  const lines = [
+    `Changed files (${files.length}${report.range ? `, ${report.range}` : ''})`,
+    ...files.slice(0, MAX_IMPACT_FILES).map((file) => `  ${file}`),
+  ];
+  if (files.length > MAX_IMPACT_FILES) {
+    lines.push(`  … and ${files.length - MAX_IMPACT_FILES} more`);
+  }
+  for (const target of report.targets) {
+    lines.push(
+      '',
+      table(
+        ['TARGET', 'AFFECTED', 'NEVER RUN', 'UNAFFECTED'],
+        [
+          [
+            target.targetId,
+            String(target.impacted.length),
+            String(target.unknown.length),
+            String(target.unaffected.length),
+          ],
+        ],
+      ),
+      ...target.impacted.map((w) => `  ${w.id}  ${oneLine(w.title, 90)}`),
+    );
+    if (target.sharedChange) {
+      lines.push(
+        'A shared file changed (manifest, lockfile or global config): a run will replay everything.',
+      );
+    }
+  }
   return lines.join('\n');
 }
 

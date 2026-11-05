@@ -215,12 +215,19 @@ Generated 2026-11-05T14:03:12.345Z for `todo`.
 
 Model usage: 4 calls, 38,112 input and 2,406 output tokens, about $0.20.
 
+## What these runs exercised
+
+Pages: `/`
+
+Endpoints: `/api/todos (GET, POST)`, `/api/todos/* (DELETE, PATCH)`
+
 ## Findings (1)
 
 ### Saving an edit after deleting the todo returns HTTP 500
 
 - Severity: **high** · Status: open · Detected by: app-error · Seen 2 times
 - Triage: bug (PATCH on a deleted id throws a TypeError on the server)
+- Touched: 1 page (/) and 3 endpoints (GET /api/todos, DELETE /api/todos/7, PATCH /api/todos/7)
 - Id: `fnd_01jc...`
 
 Reproduction (workflow "Edit a todo (swap steps 3 and 4)"):
@@ -231,15 +238,32 @@ Mutation: Performs step 4 (click) before step 3 (click); ...
 2. click target={"role":"button","name":"Edit Buy milk"}
    ...
 
+![final-state](../evidence/runs/run_01jc.../004-final-state.png)
+
 ## Runs (56, 15 not passing)
 
 | Status | Workflow | Mutation | Duration | Run |
 | ------ | -------- | -------- | -------- | --- |
 ```
 
-Sections: summary counts, model usage for the job (when any), each finding created or updated
-by the run (severity, status, detector, occurrences, triage verdict and rationale, summary,
-reproduction steps, evidence count), and one row per run.
+Sections: summary counts, model usage for the job (when any), what the runs exercised, each
+finding created or updated by the run (severity, status, detector, occurrences, triage verdict
+and rationale, what its run touched, summary, reproduction steps, screenshots, evidence count),
+and one row per run.
+
+- **What these runs exercised** is the union of every run's footprint (see
+  [Workflows](workflows.md#what-a-workflow-touches)): pages, and endpoints grouped by path with
+  their methods, ids normalised to `*`, at most 40 of each. It is left out when the adapter
+  reports nothing.
+- **Touched**, on a finding, lists the pages and endpoints of the latest of its runs in this
+  report, as recorded (ids included), so the reader sees which requests the failing sequence
+  actually made.
+- **Screenshots** of a finding (up to the last three) are embedded as images with paths
+  relative to the report, so they display wherever the report is opened next to its
+  `evidence/` directory. The evidence-count line follows when there is more evidence than that.
+- A change-aware run adds a sentence under the summary: how many files changed, and whether
+  every workflow was replayed or only the ones that exercise those files plus workflows never
+  run before.
 
 ### Errors that do not stop a run
 

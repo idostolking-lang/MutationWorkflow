@@ -4,23 +4,24 @@ MutationWorkflow is a small core with sharp edges: a domain model everything agr
 of interfaces (adapter, store, operator, oracle, model provider) and an engine that composes them.
 Models are used where judgement is needed (reading a repository, exploring an application,
 deciding whether a failure is a bug) and kept out of everything that must be cheap and
-reproducible (replay, mutation, oracles, reports). This document explains the pieces; the
-reasoning behind the bigger choices is in the [decision records](adr/README.md).
+reproducible (replay, mutation, oracles, reports, deciding which workflows a code change
+affects). This document explains the pieces; the reasoning behind the bigger choices is in the
+[decision records](adr/README.md).
 
 ## The loop
 
 ```
-                 ┌────────────────────────────────────────────────────────────┐
-                 │                         Engine                             │
-   repository ──▶│ setup ──▶ discover ──▶ mutate ──▶ replay ──▶ judge ──▶ triage │──▶ reports
-                 │  inspector  explorer  operators   executor   oracles   triager │    questions
-                 └──────┬───────────┬──────────┬─────────┬─────────┬─────────┬───┘
-                        │           │          │         │         │         │
-                 agent runtime  adapter   mutation    adapter   oracle    agent runtime
-                 (providers,    session   registry    session   registry  (vision, tools)
-                  semaphore)                                                  │
-                        └───────────────────────── store (SQLite) ────────────┘
-                                   workflows · runs · evidence · findings · questions · jobs · usage
+                 ┌──────────────────────────────────────────────────────────────────────────┐
+                 │                                 Engine                                   │
+   repository ──▶│ setup ──▶ discover ──▶ mutate ──▶ replay ──▶ judge ──▶ learn ──▶ triage  │──▶ reports
+                 │ inspector explorer   operators   executor   oracles  code map   triager  │    questions
+                 └────┬─────────┬──────────┬──────────┬─────────┬──────────┬────────┬───────┘
+                      │         │          │          │         │          │        │
+              agent runtime  adapter   mutation    adapter    oracle   code map, agent runtime
+               (providers,   session   registry    session   registry   impact  (vision, tools)
+                semaphore)                                                          │
+                      └──────────────────────── store (SQLite) ─────────────────────┘
+                 workflows (+ touches) · runs · evidence · findings · questions · jobs · usage · meta
 ```
 
 | Stage    | Who                                          | Uses a model  | Output                                                |
@@ -30,6 +31,7 @@ reasoning behind the bigger choices is in the [decision records](adr/README.md).
 | mutate   | operators (and optionally the mutator agent) | no (optional) | mutation workflows                                    |
 | replay   | executor                                     | no            | runs with step results, assertions, signals, evidence |
 | judge    | oracles                                      | no            | oracle results attached to the run                    |
+| learn    | code map, as each run is recorded            | no            | what each workflow touches: pages, endpoints, files   |
 | triage   | fingerprinting, then the triager agent       | partially     | findings (new, merged, dismissed), questions          |
 | report   | renderer                                     | no            | Markdown report                                       |
 
@@ -68,7 +70,9 @@ the same tools over MCP; a connected client calls them through the MCP server's 
     tests; the runtime (tool loop, `finish` for structured results, `delegate` for fan-out, the
     semaphore, budgets, usage records) and the role prompts. No model is ever chosen by default.
   - `engine/`: the executor, triage, exploration, mutation, setup, run, report and job modules,
-    and the `Engine` facade that wires them to a configuration.
+    `codemap` (pages and endpoints to source files), `impact` (which workflows a change
+    affects), `git` (commit, branch and changed files), and the `Engine` facade that wires them
+    to a configuration.
 - **`@mutationworkflow/adapter-web`** drives browsers through Playwright: robust locators
   (test id, role and name, label, placeholder, text, css), an action and assertion vocabulary,
   signals from console errors, page errors, failed requests and error responses, aria snapshots
@@ -89,6 +93,9 @@ the same tools over MCP; a connected client calls them through the MCP server's 
   the application's error **signals**, the oracle results, and evidence ids. Its status is
   `passed`, `failed`, `blocked` (an action the application did not offer) or `error`
   (infrastructure).
+- A workflow also carries **touches**: the pages, endpoints and source files its runs (and,
+  for a base, its variants' runs) have exercised. Each run records its own footprint as
+  `touched`.
 - A **finding** is a deduplicated problem: a fingerprint, title, summary, severity, the oracle
   that detected it, the workflows and runs that exhibit it, a minimal reproduction (the steps of
   the first workflow that hit it), triage state and verdict, and a status the team controls.
@@ -126,6 +133,37 @@ action parameters; it only knows the hints an adapter publishes for mutation ope
   machine-readable CLI output.
 - **Safety.** Environments are local and started by the tool. Scope rules fence agents in, and
   the prompts forbid real-world side effects even when the UI offers them.
+
+### Change-aware selection
+
+Replaying everything after every commit is the safe default, but slow once there are hundreds
+of mutations. So the engine remembers what each workflow touches and, given a change, replays
+only what the change can affect.
+
+- **Learning.** Every recorded run merges the adapter's footprint (pages, endpoints or command
+  words) into its workflow, and a variant's into its base as well. The code map turns the
+  accumulated pages and endpoints into files: explicit `targets[].codemap` rules plus a capped
+  search of the repository for the literal paths (see
+  [Configuration](configuration.md#targetscodemap)).
+- **Classifying.** For a list of changed files, `impact` sorts each base workflow of a target
+  into impacted (a changed file is among its files), unknown (no files yet) or unaffected.
+- **Selecting.** A change-aware run replays the impacted and unknown bases with all their
+  variants; variants are never classified on their own. It replays everything when a shared
+  file changed (dependency manifests and lockfiles, `tsconfig*.json`, Vite, Next, webpack or
+  Tailwind config, `.env.example`, `Dockerfile`, `docker-compose*.yml`, `Makefile`,
+  `prisma/schema.prisma`, anything under a `migration/` or `migrations/` directory), or when no
+  workflow of the target is known to be unaffected, since a full run then costs the same.
+- **The change.** `engine.run({ changed })` and `engine.impact()` take a `ChangeSpec`: explicit
+  `files` (relative to the project root, which wins) or a git `range`. The default range runs
+  from the commit of the last run command that replayed something (`last-run-commit` in the
+  `meta` table, else `HEAD~1`) to `HEAD`, through `git diff --name-only`.
+- **Fallback.** When git cannot list the files (no repository, a shallow clone without that
+  commit), `engine.run` logs a warning, adds it to the summary's `errors` and replays
+  everything; `engine.impact`, which runs nothing, fails with `GIT_UNAVAILABLE`.
+
+The run summary carries a `SelectionSummary` per target (changed files, impacted, unknown and
+skipped counts, and whether everything ran), and the report states how the change narrowed the
+run. The reasoning and the limits are in [ADR 0010](adr/0010-change-aware-selection.md).
 
 ## Project directory
 

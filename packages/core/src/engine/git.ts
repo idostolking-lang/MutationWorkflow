@@ -33,10 +33,11 @@ function gitRaw(cwd: string, args: string[]): Promise<string | undefined> {
 
 /**
  * Files changed in a git range such as `abc123..HEAD` or `HEAD~1..HEAD`, relative to the
- * project root. Returns undefined when git cannot answer (not a repository, unknown ref).
+ * project root and limited to it (a project may live in a subdirectory of its repository).
+ * Returns undefined when git cannot answer (not a repository, unknown ref).
  */
 export async function changedFiles(rootDir: string, range: string): Promise<string[] | undefined> {
-  const output = await gitRaw(rootDir, ['diff', '--name-only', range]);
+  const output = await gitRaw(rootDir, ['diff', '--name-only', '--relative', range]);
   if (output === undefined) return undefined;
   return output
     .split('\n')

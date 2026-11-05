@@ -227,7 +227,8 @@ a missing config, a missing provider and the client-driven tool to call instead)
 | `mw_setup`          | `validate?`, `wait?`                                                             | Job (server provider): inspect the repository, write the config (or a proposal), seed workflows and questions          |
 | `mw_explore`        | `target?`, `focus?: string[]`, `maxWorkflows?`, `wait?`                          | Job: explorer agents discover workflows (pending review) against a fresh environment                                  |
 | `mw_mutate`         | `target?`, `agent?`, `wait?`                                                     | Derive variants with the operators (direct); with `agent: true` also the mutator agent (job)                          |
-| `mw_run`            | `targets?`, `workflowIds?`, `include?: all\|base\|mutations`, `triage?`, `wait?` | Job: replay, record findings, triage, write a report                                                                  |
+| `mw_run`            | `targets?`, `workflowIds?`, `include?: all\|base\|mutations`, `triage?`, `changed?`, `range?`, `changedFiles?: string[]`, `wait?` | Job: replay, record findings, triage, write a report. `changed: true` replays only what the commits since the last run affect (plus workflows never run); `range` (a git range) or `changedFiles` (wins) name the change and imply it. The result says per target what the change selected |
+| `mw_impact`         | `files?: string[]`, `range?`, `targets?: string[]`                               | Read-only: which base workflows a change affects (affected, never run, unaffected) and whether a shared file changed. Default change: the last run's commit up to `HEAD` |
 | `mw_triage`         | `targets?`, `includeSkipped?`, `wait?`                                           | Job: triager agent reviews findings waiting for triage                                                                |
 | `mw_jobs`           | `status?`, `limit?`                                                              | Recent jobs                                                                                                           |
 | `mw_job`            | `id`                                                                             | One job: status, progress, error, result                                                                              |
@@ -236,8 +237,8 @@ a missing config, a missing provider and the client-driven tool to call instead)
 | `mw_finding`        | `id`                                                                             | Summary, triage verdict and rationale, numbered reproduction steps, evidence with absolute paths                      |
 | `mw_update_finding` | `id`, `status?`, `notes?`                                                        | Set status (`open`, `confirmed`, `fixed`, `dismissed`) and notes                                                      |
 | `mw_workflows`      | `target?`, `origin?`, `status?`, `base?`, `limit?`                               | Workflows; `base: true` base only, `base: false` mutations only                                                       |
-| `mw_workflow`       | `id`                                                                             | Intent, steps, expectations, mutation, latest run                                                                     |
-| `mw_run_detail`     | `id`                                                                             | One run: status, trigger, timing, step statuses and messages, failed assertions, signals, oracle verdicts             |
+| `mw_workflow`       | `id`                                                                             | Intent, steps, expectations, mutation, what it touches (pages, endpoints, files), latest run                          |
+| `mw_run_detail`     | `id`                                                                             | One run: status, trigger, timing, step statuses and messages, failed assertions, signals, oracle verdicts, pages and endpoints touched |
 | `mw_questions`      | `status?: open\|answered\|all`, `limit?`                                         | Questions for the team (open by default)                                                                              |
 | `mw_answer`         | `id`, `decision: confirm\|bug\|dismiss`, `answer?`                               | Record the team's answer; activates/archives the workflow or confirms/dismisses the finding                           |
 | `mw_search`         | `query`, `target?`, `limit?`                                                     | Full-text search across workflows and findings                                                                        |
@@ -265,6 +266,15 @@ Questions are meant for the human: a client should ask the user before calling `
 2. `mw_mutate {}` (direct).
 3. `mw_run {}` → poll `mw_job`; the result lists findings created or updated and the report path.
 4. `mw_findings {"status": "open"}`, then `mw_finding {"id": "fnd_..."}` for the worst ones.
+
+**After a push.**
+
+1. `mw_impact {}` → the files changed since the last run and, per target, the workflows they
+   affect, the ones never run and the ones unaffected (or `{"files": ["src/api/todos.ts"]}` for
+   uncommitted work; without git history, pass `files`).
+2. `mw_run {"changed": true}` → poll `mw_job`; only the affected and never-run workflows replay,
+   with their variants, and the result says per target what was selected. A changed manifest,
+   lockfile or global config replays everything.
 
 **"Is finding X real?"**
 

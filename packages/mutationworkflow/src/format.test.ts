@@ -17,9 +17,12 @@ import {
   formatDuration,
   formatFindingDetail,
   formatFindings,
+  formatImpact,
   formatRunDetail,
   formatRunLine,
+  formatSelection,
   formatStatus,
+  formatWorkflowDetail,
   oneLine,
   table,
 } from './format.js';
@@ -127,9 +130,11 @@ describe('domain formatting', () => {
       ],
       oracles: [{ oracle: 'assertions', verdict: 'fail', severity: 'medium', summary: '1 failed' }],
       evidenceIds: ['ev_1'],
+      touched: { urls: ['/'], endpoints: ['GET /api/todos', 'POST /api/todos'] },
       context: {},
     });
     const text = formatRunDetail(run);
+    expect(text).toContain('Touched:\n  pages: /\n  endpoints: GET /api/todos, POST /api/todos');
     expect(text).toContain('Run run_1: failed (1.2s)');
     expect(text).toContain('workflow: wf_1 · target: web · trigger: mcp');
     expect(text).toContain('2. s2 failed: button missing');
@@ -137,6 +142,47 @@ describe('domain formatting', () => {
     expect(text).toContain('console-error at s2: boom');
     expect(text).toContain('assertions fail (medium): 1 failed');
     expect(text).toContain('Evidence: ev_1');
+  });
+
+  it('renders what a workflow touches only once it is known', () => {
+    expect(formatWorkflowDetail({ workflow, variants: 0 })).not.toContain('Touches');
+    const learned = {
+      ...workflow,
+      touches: { urls: ['/'], endpoints: [], files: ['server.js'], updatedAt: NOW },
+    };
+    const text = formatWorkflowDetail({ workflow: learned, variants: 0 });
+    expect(text).toContain(`Touches (learned ${NOW}):\n  pages: /\n  files: server.js`);
+    expect(text).not.toContain('endpoints:');
+  });
+
+  it('renders how a change narrowed a run', () => {
+    const base = { targetId: 'app', changedFiles: 3, impacted: 2, unknown: 1, skipped: 5 };
+    expect(formatSelection({ ...base, everything: false })).toBe(
+      'Change (3 files): app → 2 workflows affected, 1 never run, 5 skipped',
+    );
+    expect(formatSelection({ ...base, changedFiles: 1, everything: true })).toBe(
+      'Change (1 file): app → every workflow replayed',
+    );
+  });
+
+  it('renders an impact report', () => {
+    const files = Array.from({ length: 22 }, (_, i) => `src/file${i}.ts`);
+    const text = formatImpact({
+      changedFiles: files,
+      range: 'abc..HEAD',
+      targets: [
+        { targetId: 'web', impacted: [workflow], unknown: [], unaffected: [], sharedChange: true },
+      ],
+    });
+    expect(text).toContain('Changed files (22, abc..HEAD)\n  src/file0.ts');
+    expect(text).toContain('  src/file19.ts\n  … and 2 more');
+    expect(text).not.toContain('src/file20.ts');
+    expect(text).toContain(
+      'TARGET  AFFECTED  NEVER RUN  UNAFFECTED\nweb     1         0          0',
+    );
+    expect(text).toContain('  wf_1  Add a todo');
+    expect(text).toContain('A shared file changed (manifest, lockfile or global config)');
+    expect(formatImpact({ changedFiles: [], targets: [] })).toBe('Changed files (0)');
   });
 
   it('prints agent problems in the status', () => {
@@ -222,6 +268,9 @@ describe('errors and doctor', () => {
       'Install Claude Code or Codex, export ANTHROPIC_API_KEY',
     );
     expect(describeError(new Error('plain'), 'cli')).toBe('plain');
+    const git = new MutationWorkflowError('GIT_UNAVAILABLE', 'No git.');
+    expect(describeError(git, 'cli')).toBe('No git. Use --file <path> (repeatable).');
+    expect(describeError(git, 'mcp')).toContain('`files`');
   });
 
   it('checks the Node version', () => {

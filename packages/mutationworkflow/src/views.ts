@@ -5,6 +5,7 @@
 import type {
   ExploreResult,
   Finding,
+  ImpactReport,
   Job,
   MutateResult,
   Run,
@@ -12,6 +13,7 @@ import type {
   SetupResult,
   Severity,
   Workflow,
+  WorkflowTouches,
 } from '@mutationworkflow/core';
 
 export interface FindingView {
@@ -48,9 +50,11 @@ export interface WorkflowView {
   steps: number;
   parentId?: string;
   mutation?: string;
+  /** Pages, endpoints and files the workflow was seen to exercise, once it has run. */
+  touches?: WorkflowTouches;
 }
 
-/** Compact workflow: identity, status, origin, step count and mutation description. */
+/** Compact workflow: identity, status, origin, step count, mutation and learned footprint. */
 export function workflowView(workflow: Workflow): WorkflowView {
   return {
     id: workflow.id,
@@ -61,6 +65,22 @@ export function workflowView(workflow: Workflow): WorkflowView {
     steps: workflow.steps.length,
     ...(workflow.parentId ? { parentId: workflow.parentId } : {}),
     ...(workflow.mutation ? { mutation: workflow.mutation.description } : {}),
+    ...(workflow.touches ? { touches: workflow.touches } : {}),
+  };
+}
+
+/** An impact report with every workflow reduced to its compact view. */
+export function impactView(report: ImpactReport) {
+  return {
+    changedFiles: report.changedFiles,
+    ...(report.range ? { range: report.range } : {}),
+    targets: report.targets.map((target) => ({
+      targetId: target.targetId,
+      sharedChange: target.sharedChange,
+      impacted: target.impacted.map(workflowView),
+      unknown: target.unknown.map(workflowView),
+      unaffected: target.unaffected.map(workflowView),
+    })),
   };
 }
 
@@ -174,6 +194,8 @@ export function summarizeRun(summary: RunSummary) {
     reportPath: summary.reportPath,
     findings: summary.findings.map(findingView),
     notPassing: summary.runs.filter((r) => r.status !== 'passed').map((r) => runView(r)),
+    ...(summary.selection ? { selection: summary.selection } : {}),
+    ...(summary.errors.length > 0 ? { errors: summary.errors } : {}),
   };
 }
 

@@ -22,3 +22,15 @@ All notable changes to this project are documented here. The format follows
   plants sequence bugs.
 - `mw` command-line interface and MCP server for Claude Code, Codex and Cursor.
 - Continuous mode, cron scheduling and a GitHub Actions recipe for runs on push.
+- Change-aware runs: every run records what it touched (`runs.touched`: pages and endpoints from
+  the web adapter, command words from the cli adapter), workflows accumulate it with the source
+  files behind it (`workflows.touches`, variants teaching their base), and
+  `engine.run({ changed })` and `engine.impact()` replay or list only the workflows a change
+  affects, plus those never run. The change defaults to the commits since the last run (`last-run-commit`); a shared file
+  change or an unreadable git history replays everything.
+- `targets[].codemap` rules mapping pages and endpoints to source files, alongside a search of
+  the repository for literal paths, and `schedule.cron[].changedOnly`.
+- Optional `AdapterSession.footprint()` for adapter authors.
+- Run reports embed finding screenshots with paths relative to the report, list what the runs
+  exercised, show what each finding's run touched, and say how a change narrowed the run.
+- ADR 0010 on change-aware selection.

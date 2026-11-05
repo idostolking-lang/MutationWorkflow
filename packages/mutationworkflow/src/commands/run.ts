@@ -1,4 +1,4 @@
-import type { RunSummary, Severity } from '@mutationworkflow/core';
+import type { ChangeSpec, RunSummary, Severity } from '@mutationworkflow/core';
 import type { Command } from 'commander';
 import type { Cli } from '../context.js';
 import { ExitCode } from '../errors.js';
@@ -17,6 +17,20 @@ interface RunCommandOptions {
   report: boolean;
   trigger: 'manual' | 'push' | 'schedule';
   failOn?: Severity;
+  /** `true` for a bare `--changed`, the range when one is given. */
+  changed?: boolean | string;
+  changedFile: string[];
+}
+
+/** The change to narrow the run to, from `--changed [range]` and `--changed-file`. */
+export function changeSpec(options: Pick<RunCommandOptions, 'changed' | 'changedFile'>) {
+  const range = typeof options.changed === 'string' ? options.changed : undefined;
+  if (options.changedFile.length === 0 && options.changed === undefined) return undefined;
+  const spec: ChangeSpec = {
+    ...(range ? { range } : {}),
+    ...(options.changedFile.length > 0 ? { files: options.changedFile } : {}),
+  };
+  return spec;
 }
 
 export function registerRun(program: Command, cli: Cli): void {
@@ -44,9 +58,20 @@ export function registerRun(program: Command, cli: Cli): void {
       'exit with code 2 when a finding at or above this severity was created or updated',
       oneOf(SEVERITIES),
     )
+    .option(
+      '--changed [range]',
+      "replay only workflows affected by a git range (default: the last run's commit..HEAD) and those never run",
+    )
+    .option(
+      '--changed-file <path>',
+      'replay only workflows affected by this changed file (repeatable; implies --changed, wins over a range)',
+      collect,
+      [],
+    )
     .action((targetIds: string[], options: RunCommandOptions) =>
       cli.withEngine(async (engine) => {
         const targets = requireTargets(engine, targetIds);
+        const changed = changeSpec(options);
         const summary: RunSummary = cli.completed(
           await runJob(
             engine,
@@ -62,6 +87,7 @@ export function registerRun(program: Command, cli: Cli): void {
                   triage: options.triage,
                   report: options.report,
                   trigger: options.trigger,
+                  ...(changed ? { changed } : {}),
                   jobId: job.job.id,
                   signal: job.signal,
                   onEvent: cli.onAgentEvent,

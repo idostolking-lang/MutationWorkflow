@@ -1,0 +1,19 @@
+# MutationWorkflow configuration for the example app. See docs/configuration.md for every field.
+version: 1
+project: { name: todo-web }
+targets:
+  - id: todo
+    kind: web
+    options: { baseUrl: http://127.0.0.1:4173 }
+    codemap:
+      - match: /api/todos/**
+        description: The todo API and the client code that calls it
+        files: [server.js, public/app.js]
+    environment:
+      start:
+        command: node server.js
+        env: { PORT: "4173" }
+        ready: { url: http://127.0.0.1:4173/api/health }
+      reset:
+        command: node -e "fetch('http://127.0.0.1:4173/api/reset',{method:'POST'})"
+execution: { resetBetweenRuns: true }

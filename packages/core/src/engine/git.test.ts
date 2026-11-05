@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -36,11 +36,23 @@ describe('git helpers', () => {
     const first = git(dir, 'rev-parse', 'HEAD');
     writeFileSync(join(dir, 'b.txt'), 'b\n');
     writeFileSync(join(dir, 'a.txt'), 'changed\n');
+    mkdirSync(join(dir, 'apps', 'web'), { recursive: true });
+    writeFileSync(join(dir, 'apps', 'web', 'server.js'), 'serve()\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    expect(await changedFiles(dir, `${first}..HEAD`)).toEqual(['a.txt', 'b.txt']);
-    expect(await changedFiles(dir, 'HEAD~1..HEAD')).toEqual(['a.txt', 'b.txt']);
+    expect(await changedFiles(dir, `${first}..HEAD`)).toEqual([
+      'a.txt',
+      'apps/web/server.js',
+      'b.txt',
+    ]);
+    expect(await changedFiles(dir, 'HEAD~1..HEAD')).toEqual([
+      'a.txt',
+      'apps/web/server.js',
+      'b.txt',
+    ]);
+    // A project in a subdirectory sees paths relative to itself and nothing outside it.
+    expect(await changedFiles(join(dir, 'apps', 'web'), 'HEAD~1..HEAD')).toEqual(['server.js']);
     expect(await changedFiles(dir, 'HEAD..HEAD')).toEqual([]);
     expect(await changedFiles(dir, 'no-such-ref..HEAD')).toBeUndefined();
     expect(await getGitContext(dir)).toEqual({

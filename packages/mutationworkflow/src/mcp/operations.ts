@@ -4,7 +4,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { Engine } from '@mutationworkflow/core';
+import type { ChangeSpec, Engine } from '@mutationworkflow/core';
 import { z } from 'zod';
 import {
   formatExploreResults,
@@ -191,7 +191,7 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
     {
       title: 'Replay workflows',
       description:
-        'Start the app in a fresh local environment, replay workflows (base and mutations), record runs and evidence, fold failures into findings, triage them and write a report. Returns a job id to poll with mw_job; the result lists findings created or updated.',
+        'Start the app in a fresh local environment, replay workflows (base and mutations), record runs and evidence, fold failures into findings, triage them and write a report. changed: true replays only what the last commits affect (plus workflows never run); mw_impact previews that. Returns a job id to poll with mw_job; the result lists findings created or updated.',
       inputSchema: {
         targets: z.array(z.string()).optional().describe('Target ids; all targets when omitted'),
         workflowIds: z.array(z.string()).optional().describe('Only these workflows'),
@@ -203,24 +203,51 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
           .boolean()
           .optional()
           .describe('Let the triager agent review new findings (default true with a model key)'),
+        changed: z
+          .boolean()
+          .optional()
+          .describe(
+            "Replay only workflows affected by commits since the last run's commit (and those never run)",
+          ),
+        range: z
+          .string()
+          .optional()
+          .describe('Git range of the change, e.g. "abc123..HEAD"; implies changed'),
+        changedFiles: z
+          .array(z.string())
+          .optional()
+          .describe('Changed files relative to the project root; implies changed, wins over range'),
         wait,
       },
       annotations: OPERATION,
     },
     safe(async (args) => {
       const targetIds = requireTargets(engine, args.targets).map((t) => t.id);
+      const changed: ChangeSpec | undefined =
+        args.changedFiles || args.range !== undefined || args.changed
+          ? {
+              ...(args.changedFiles ? { files: args.changedFiles } : {}),
+              ...(args.range !== undefined ? { range: args.range } : {}),
+            }
+          : undefined;
       return operation(
         engine,
         args.wait,
         {
           kind: 'run',
-          params: { targets: targetIds, workflowIds: args.workflowIds, include: args.include },
+          params: {
+            targets: targetIds,
+            workflowIds: args.workflowIds,
+            include: args.include,
+            ...(changed ? { changed } : {}),
+          },
           work: (job) =>
             engine.run({
               targetIds,
               workflowIds: args.workflowIds,
               include: args.include,
               triage: args.triage,
+              ...(changed ? { changed } : {}),
               trigger: 'mcp',
               jobId: job.job.id,
               signal: job.signal,
@@ -230,7 +257,10 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
             }),
           summarize: summarizeRun,
         },
-        formatRunSummary,
+        (summary) =>
+          summary.errors.length > 0
+            ? `${formatRunSummary(summary)}\n\nProblems:\n${summary.errors.map((e) => `  - ${e}`).join('\n')}`
+            : formatRunSummary(summary),
       );
     }),
   );

@@ -37,7 +37,7 @@ against its schema again.
 
 | Table           | One row per            | Indexed columns                                                                                                                      |
 | --------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `meta`          | Key/value setting      | `key`, `value` (`schema_version` = number of migrations applied)                                                                     |
+| `meta`          | Key/value setting      | `key`, `value` (`schema_version` = number of migrations applied; `last-run-commit`, below)                                           |
 | `targets`       | Target from the config | `id`, `updated_at`; redacted copy upserted from the config on every start, never deleted                                             |
 | `workflows`     | Workflow               | `target_id`, `fingerprint`, `origin`, `status`, `parent_id`, `created_at`, `updated_at`; unique `(target_id, fingerprint)`           |
 | `workflows_fts` | Workflow (FTS5)        | `id` (unindexed), `title`, `intent`, `tags`, `steps_text`                                                                            |
@@ -57,6 +57,36 @@ the rest of the database.
 Record shapes are documented in [Workflows](workflows.md#the-record) (workflows, runs, evidence)
 and [Oracles](oracles.md) (findings, questions). Ids carry a prefix and sort by creation time:
 `wf_`, `run_`, `ev_`, `fnd_`, `q_`, `job_`, `ses_` (explorer sessions). Target ids are the ids from the config.
+
+### What workflows learned they touch
+
+Change-aware runs ([Workflows](workflows.md#what-a-workflow-touches)) rely on three pieces of
+memory. None has an indexed column of its own; the first two live in the JSON of their record.
+
+| Where                      | Contents                                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------- |
+| `runs` → `touched`         | `{ urls, endpoints }` the adapter reported for that run; empty lists when it reports nothing |
+| `workflows` → `touches`    | `{ urls, endpoints, files, updatedAt }` accumulated over every run of the workflow and, for a base, of its variants; absent until a run touched something |
+| `meta` → `last-run-commit` | The git commit of the last run command that replayed at least one workflow                  |
+
+`last-run-commit` is where a change-aware run diffs from when no range is given (`HEAD~1` when it
+is missing). It only advances when a run command completes with at least one run and git
+reports a commit. Deleting the database therefore also resets what each workflow learned: the
+next change-aware run treats every workflow as unknown and replays everything.
+
+```sql
+-- What one workflow is known to touch
+SELECT json -> '$.touches.endpoints', json -> '$.touches.files'
+FROM workflows WHERE id = 'wf_01jc...';
+
+-- Workflows nothing is known about yet (replayed on every change-aware run)
+SELECT id, json ->> '$.title' FROM workflows
+WHERE parent_id IS NULL AND status IN ('active', 'pending-review')
+  AND COALESCE(json_array_length(json, '$.touches.files'), 0) = 0;
+
+-- The commit the next change-aware run diffs from
+SELECT value FROM meta WHERE key = 'last-run-commit';
+```
 
 Migrations are applied in order on every start and recorded in `meta.schema_version`. A database
 written by a newer MutationWorkflow (higher schema version) is refused rather than misread.
@@ -128,6 +158,23 @@ SELECT id, json ->> '$.kind', json ->> '$.question' FROM questions WHERE status 
 Do not write to the tables by hand: the JSON column and its indexed copies (and the FTS tables)
 must stay consistent. Use the CLI or MCP tools to change records.
 
+## Finding the evidence
+
+Evidence of a replay is on disk under `<evidenceDir>/runs/<runId>/` (screenshots as
+`NNN-<label>.png`, console and output captures as text), and each item has an `evidence` row
+with its id, kind, label, step and relative path. A person usually reaches it one of these ways:
+
+- **The run report.** Each finding in `reports/<timestamp>-run.md` embeds up to its last three
+  screenshots as images, with paths relative to the report, so the report shows them when
+  opened in an editor or Markdown viewer (and still does after the `.mutationworkflow`
+  directory is moved as a whole). See [Oracles](oracles.md#reports).
+- **`mw finding <id>`** (or the `mw_finding` MCP tool): reproduction steps and the finding's
+  evidence with absolute file paths.
+- **MCP tools.** `mw_run_detail` lists a run's steps, verdicts and evidence ids; `mw_evidence`
+  returns one item, screenshots as images and text captures as text (see [MCP](mcp.md)).
+- **SQL.** `SELECT kind, label, path FROM evidence WHERE run_id = 'run_01jc...'`, then open
+  `<evidenceDir>/<path>`.
+
 ## Usage and cost
 
 The `usage` table has one row per model call. `cost_usd` is an estimate and is `NULL` when no price is
@@ -177,12 +224,15 @@ sqlite3 .mutationworkflow/mw.db ".backup 'mw-backup.db'"
 
 Evidence paths in the database are relative to the evidence directory, and config paths are
 relative to the config file, so a copied project with its `.mutationworkflow` directory works
-anywhere. Reports are plain Markdown and mention the absolute evidence path of the machine that
-wrote them.
+anywhere. Reports are plain Markdown; embedded screenshots use paths relative to the report,
+while the evidence-count line mentions the absolute evidence path of the machine that wrote
+them.
 
 To share memory in CI, cache or restore the directory between jobs; concurrent writers on one
 database are serialised by SQLite (a 5 s busy timeout), so run one MutationWorkflow process per
 database at a time.
+Change-aware runs depend on this: on a fresh database every workflow is unknown and
+everything is replayed, so restore the memory before such a run and save it afterwards.
 
 ## What is safe to delete
 

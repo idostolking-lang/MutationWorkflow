@@ -8,6 +8,10 @@ node server.js            # http://127.0.0.1:4173
 PORT=5000 node server.js
 ```
 
+`mutationworkflow.config.yaml` next to it configures MutationWorkflow for the app: how to start
+and reset it, and a `codemap` rule that ties the todo API to `server.js` and `public/app.js`, so
+`mw run --changed` knows which workflows a change to either file affects.
+
 | Endpoint                      | Purpose                            |
 | ----------------------------- | ---------------------------------- |
 | `GET /`                       | The app                            |

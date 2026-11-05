@@ -161,6 +161,7 @@ works.
 | `identities`  | array  | `[]`       | Users workflows can act as                                                   |
 | `invariants`  | array  | `[]`       | Checks that must hold after any workflow                                     |
 | `scope`       | object | see below  | Boundaries for agents and replays                                            |
+| `codemap`     | array  | `[]`       | Rules from pages and endpoints to source files, for change-aware runs        |
 
 Adapter options are documented in [Adapters](adapters.md): `baseUrl`, `allowRemoteBaseUrl`,
 `browser`, `headless`, `viewport`, `launchOptions`, `storageStatePath` for `web`; `command`,
@@ -259,6 +260,51 @@ invariants run once at the end, even when the workflow stopped early.
 
 Scope is enforced by the adapter, during exploration and replay alike. The built-in `web`
 adapter enforces all three; the `cli` adapter has no URLs or controls and ignores scope.
+
+### `targets[].codemap`
+
+Explicit rules that tie what workflows touch (pages and endpoints, see
+[Workflows](workflows.md#what-a-workflow-touches)) to the source files that implement them. A
+change-aware run replays a workflow when a changed file is among its files. Rules are optional:
+without them the engine searches the repository for files that mention each path literally,
+which finds routes and clients written as `'/api/todos'` but not code that builds its paths.
+
+| Field         | Type     | Default  | Meaning                                                         |
+| ------------- | -------- | -------- | --------------------------------------------------------------- |
+| `match`       | string   | required | Glob over a normalised page path or endpoint                    |
+| `files`       | string[] | required | At least one path or glob, relative to the project root         |
+| `description` | string   | none     | What the rule covers, for people reading the config             |
+
+`match` is tested against each page and endpoint a workflow touched, after normalisation:
+query strings and fragments are removed, and segments that look like ids (all digits, a UUID,
+16 or more hex characters, or a prefixed id such as `wf_01jc8x9k2m`) become `*`. So
+`DELETE /api/todos/42?force=1` is matched as `/api/todos/*` and as `DELETE /api/todos/*`, and
+also with a trailing slash (`/api/todos/*/`). In the glob, `*` matches within one segment and
+`**` across segments. Because of the trailing slash, `/api/todos/**` covers the collection
+`/api/todos` as well as every item below it. A pattern with a method restricts a rule to that
+method and gets the same treatment, so `POST /api/todos/**` covers posts to the collection and
+to its items. For `cli` targets, command words are plain tokens: `match: add` covers the `add`
+command, and the repository is not searched for bare words.
+
+```yaml
+targets:
+  - id: todo
+    kind: web
+    options: { baseUrl: http://127.0.0.1:4173 }
+    codemap:
+      - match: /api/todos/**
+        description: Todo API and the client code that calls it
+        files: [server.js, public/app.js]
+      - match: /settings
+        files: ["src/settings/**"]
+```
+
+A file in `files` that is a directory path (no glob characters) also covers everything under
+it. The repository search reads text files up to 512 KiB, skips `.git`, `node_modules`,
+`dist`, `build`, `out`, `coverage`, `target`, `vendor`, `.next`, `.nuxt`, `.turbo`, `.cache`,
+`.venv`, `venv`, `__pycache__`, `.mutationworkflow`, `test-results` and `playwright-report`,
+keeps at most 25 files per path, and a workflow keeps at most 60 files in all, so a generic
+path cannot claim the whole repository. Root-only paths (`/`) are never searched for.
 
 ### `providers`
 
@@ -382,9 +428,15 @@ Signal kinds: `console-error`, `uncaught-exception`, `network-error`, `http-erro
 | `cron[].expression`             | string                                    | required  | Cron expression                                        |
 | `cron[].action`                 | `run` \| `explore` \| `mutate` \| `cycle` | `cycle`   | What to do                                             |
 | `cron[].target`                 | string                                    | all       | Restrict to one target id                              |
+| `cron[].changedOnly`            | boolean                                   | `false`   | Replay only workflows affected by commits since the last run |
 
 A continuous cycle explores (on exploration cycles), mutates every target, then replays
-everything. See [CLI](cli.md) for the commands that use these settings.
+everything. With `changedOnly: true`, the replay of a `run` or `cycle` entry is limited to the
+workflows whose learned files overlap the files changed between the commit of the last run and
+`HEAD`, plus workflows nothing is known about yet; a change to a shared file, or a git history
+that cannot be read, replays everything (see
+[Architecture](architecture.md#change-aware-selection)). See [CLI](cli.md) for the commands
+that use these settings.
 
 ## Where files live
 

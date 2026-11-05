@@ -321,7 +321,9 @@ export function mergeTouches(
 ): Workflow | undefined {
   const urls = union(workflow.touches?.urls ?? [], footprint.urls);
   const endpoints = union(workflow.touches?.endpoints ?? [], footprint.endpoints);
-  const files = mapper.filesFor({ urls, endpoints });
+  // A workflow imported from a test file follows that file too.
+  const source = workflow.source?.file ? [workflow.source.file] : [];
+  const files = union(mapper.filesFor({ urls, endpoints }), source).sort();
   const previous = workflow.touches;
   if (
     previous &&

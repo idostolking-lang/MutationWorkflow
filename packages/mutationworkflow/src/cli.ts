@@ -3,6 +3,7 @@ import { Command, CommanderError, Option } from 'commander';
 import { registerDoctor } from './commands/doctor.js';
 import { registerExplore } from './commands/explore.js';
 import { registerFindings } from './commands/findings.js';
+import { registerImpact } from './commands/impact.js';
 import { registerInit } from './commands/init.js';
 import { registerJobs } from './commands/jobs.js';
 import { registerMcp } from './commands/mcp.js';
@@ -36,6 +37,7 @@ const COMMANDS = [
   registerExplore,
   registerMutate,
   registerRun,
+  registerImpact,
   registerTriage,
   registerWatch,
   registerSchedule,

@@ -121,6 +121,8 @@ is printed as it completes, then a summary table and the findings that were crea
 | `--no-report`                           | Do not write a report                                                                                              |
 | `--trigger manual\|push\|schedule`      | Recorded on each run (default `manual`)                                                                            |
 | `--fail-on critical\|high\|medium\|low` | Exit 2 when a finding at or above this severity was created or updated (dismissed and fixed findings do not count) |
+| `--changed [range]`                     | Replay only the workflows a git range affects, plus those never run (default range: the commit of the last run up to `HEAD`, else `HEAD~1..HEAD`) |
+| `--changed-file <path>`                 | A changed file, relative to the project root; repeatable; implies `--changed` and wins over a range                |
 
 ```text
 $ mw run --include mutations
@@ -130,6 +132,53 @@ $ mw run --include mutations
 PASSED  FAILED  BLOCKED  ERROR  TOTAL  DURATION
 10      2       0        0      12     9.4s
 ```
+
+Every run records the pages and endpoints it touched, and the engine maps them to the repository
+files behind them (`targets[].codemap` rules, plus a search of the repository for the literal
+endpoint and page paths). With `--changed` or `--changed-file`, only the base workflows whose
+files overlap the change replay, with their variants, plus the ones nothing is known about yet.
+Everything replays when a shared file changed (a manifest, lockfile or global config) or when no
+workflow is known to be unaffected. When git cannot list the changed files (no repository, or a
+shallow clone without that history), everything replays and a warning says so. After the summary
+table, one line per target says what the change selected:
+
+```text
+Change (3 files): web → 2 workflows affected, 1 never run, 5 skipped
+Change (1 file): api → every workflow replayed
+```
+
+`--changed` takes an optional value, so put target names before it (`mw run web --changed`) or
+give the range (`mw run --changed main..HEAD web`).
+
+### `mw impact [range]`
+
+Show which base workflows a change affects, from what earlier runs learned; nothing runs. The
+change is `range` (a git range such as `abc123..HEAD`), the `--file` paths, or by default the
+commit of the last run up to `HEAD` (`HEAD~1..HEAD` before any run). Variants follow their base
+and are not listed. Exits 0 whatever the change affects; when git cannot answer it exits 1 and
+asks for `--file`.
+
+| Option          | Meaning                                                                       |
+| --------------- | ----------------------------------------------------------------------------- |
+| `--file <path>` | A changed file, relative to the project root; repeatable; wins over the range |
+| `--json`        | Print the report as JSON (workflows in their compact form, with `touches`)    |
+
+```text
+$ mw impact main..HEAD
+Changed files (3, main..HEAD)
+  src/api/todos.ts
+  src/components/TodoList.tsx
+  README.md
+
+TARGET  AFFECTED  NEVER RUN  UNAFFECTED
+web     2         1          5
+  wf_01jc2k9x7m3ab5nq8r4t  Add a todo
+  wf_01jc2kb4f2q6w8e1r3ty  Edit then delete
+```
+
+`NEVER RUN` counts workflows with no file knowledge yet (never run, or their pages and endpoints
+map to no file); a run with `--changed` replays them. When a shared file changed, a note says a
+run will replay everything.
 
 ### `mw triage [target]`
 
@@ -152,16 +201,19 @@ Run the `schedule.cron` entries of the config until Ctrl+C. Each entry has an `e
 (standard cron, optionally with seconds), an `action` (`run`, `explore`, `mutate` or `cycle`:
 explore with a model key, then mutate, then run) and an optional `target`. Only one tick runs at
 a time; a tick that fires while another is running is skipped and logged. Exits with an error
-when no entries are configured.
+when no entries are configured. With `changedOnly: true`, the `run` and `cycle` actions replay
+only the workflows affected by the commits since the last run (as `mw run --changed`), plus
+those never run.
 
 ```yaml
 schedule:
   cron:
     - expression: "0 3 * * *" # nightly full cycle
       action: cycle
-    - expression: "*/30 9-18 * * 1-5" # replay every 30 minutes during work hours
+    - expression: "*/30 9-18 * * 1-5" # every 30 minutes during work hours, what changed
       action: run
       target: web
+      changedOnly: true
 ```
 
 ## Memory
@@ -172,7 +224,7 @@ schedule:
 | `mw findings [target]`      | `--status open\|confirmed\|fixed\|dismissed`, `--severity <s>`, `--limit <n>` (50), `--json` | Findings, most recently seen first                                                                                                                                                                  |
 | `mw finding <id>`           | `--status <s>`, `--note <text>`, `--json`                                                    | Summary, triage verdict, numbered reproduction steps, evidence with absolute paths; `--status`/`--note` update it first                                                                             |
 | `mw workflows [target]`     | `--origin <o>`, `--status <s>`, `--base` or `--mutations`, `--limit <n>` (100), `--json`     | Workflows                                                                                                                                                                                           |
-| `mw workflow <id>`          | `--json`                                                                                     | Intent, numbered steps, expectations, mutation, variants, latest run                                                                                                                                |
+| `mw workflow <id>`          | `--json`                                                                                     | Intent, numbered steps, expectations, mutation, variants, what it touches (pages, endpoints, files), latest run                                                                                     |
 | `mw questions`              | `--all`, `--json`                                                                            | Open questions (all with `--all`)                                                                                                                                                                   |
 | `mw answer <id> <decision>` | `--note <text>`                                                                              | `confirm` activates the workflow; `bug` confirms or records a finding; `dismiss` archives the workflow or dismisses the finding                                                                     |
 | `mw search <query>`         | `--target <id>`, `--limit <n>` (20), `--json`                                                | Full-text search across workflows and findings                                                                                                                                                      |
@@ -206,7 +258,10 @@ Everything lives under the project root, configurable in the config file:
 triage, a model provider: in CI that is usually an API key plus a model named in
 `agents.defaults.model` in the committed config (no coding agent is logged in there). `--fail-on high` fails the build when a high or critical finding was created or updated.
 Commit the config file; keep `.mutationworkflow/` out of Git, or cache it between builds to keep
-the memory (workflows and finding history).
+the memory (workflows and finding history). `--changed` replays only what the pushed commits
+affect; it needs the commit history (`fetch-depth: 0`) and the memory from earlier runs, because
+that is where workflows learn which files they touch: without the cache every workflow is "never
+run" and the whole suite replays.
 
 ```yaml
 # .github/workflows/mutationworkflow.yml
@@ -222,6 +277,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # --changed diffs the pushed commits
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -234,7 +291,7 @@ jobs:
           key: mutationworkflow-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: mutationworkflow-${{ github.ref_name }}-
       - run: npx mutationworkflow mutate
-      - run: npx mutationworkflow run --trigger push --fail-on high
+      - run: npx mutationworkflow run --trigger push --changed ${{ github.event.pull_request.base.sha || github.event.before }}..${{ github.sha }} --fail-on high
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       - uses: actions/upload-artifact@v4
@@ -245,6 +302,10 @@ jobs:
             .mutationworkflow/reports
             .mutationworkflow/evidence
 ```
+
+On a push the range is `${{ github.event.before }}..${{ github.sha }}`; pull requests have no
+`before`, hence the base commit. When the range cannot be read (the first push of a branch, a
+force push), everything replays. Drop `--changed` for a full replay on every build.
 
 For nightly exploration, run `npx mutationworkflow explore` on a `schedule:` trigger before
 `run`, or keep a machine running `mw schedule`.

@@ -12,6 +12,7 @@ import { ExplorationRegistry } from './sessions.js';
 const INSTRUCTIONS = `MutationWorkflow finds sequence bugs: agents discover user workflows in the app, the engine mutates them (skip, reorder, repeat, interrupt, fuzz) and replays them against a local environment it starts itself.
 Typical flow: mw_status → mw_setup (no config yet) → mw_explore → mw_mutate → mw_run → mw_findings → mw_finding / mw_evidence.
 setup, explore, run, triage and agent mutate start background jobs: they return a job id; poll mw_job until it is succeeded, failed or cancelled.
+After a push: mw_impact shows which workflows the change affects; mw_run {"changed": true} replays just those.
 Questions from mw_questions are for the human: ask the user before answering with mw_answer.
 Agent roles (inspector, explorer, triager, mutator) can run in the server (needs a model provider) or be done by you with your own model and no API key: mw_inspect_brief → mw_inspect_apply; mw_explore_open → mw_act / mw_check / mw_save_workflow → mw_explore_close; mw_triage_brief → mw_triage_apply; mw_mutation_brief → mw_mutation_apply. The setup, explore, triage and mutate prompts walk through each.`;
 

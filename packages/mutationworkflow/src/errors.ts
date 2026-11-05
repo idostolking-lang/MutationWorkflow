@@ -58,6 +58,8 @@ export function describeError(error: unknown, surface: Surface): string {
       return `${error.message}\nBuilt-in kinds are "web" and "cli"; other adapters must be installed in the project.`;
     case 'ENVIRONMENT_FAILED':
       return `The application environment could not be started. ${error.message}`;
+    case 'GIT_UNAVAILABLE':
+      return `${error.message} ${surface === 'mcp' ? 'Use the `files` argument.' : 'Use --file <path> (repeatable).'}`;
     case 'BUDGET_EXCEEDED':
       return `The model budget for this job was exhausted. ${error.message}`;
     default:

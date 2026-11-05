@@ -14,4 +14,5 @@ rather than editing history.
 | [0006](0006-typescript-pnpm-monorepo.md)                 | TypeScript, a pnpm monorepo and strict tooling                      |
 | [0007](0007-one-semaphore-for-model-calls.md)            | One semaphore over model calls defines parallelism                  |
 | [0008](0008-mcp-and-cli-share-one-engine.md)             | The MCP server and the CLI are thin layers over one engine          |
-| [0009](0009-no-default-model-bring-your-own-agent.md) | No default model; bring your own agent |
+| [0009](0009-no-default-model-bring-your-own-agent.md)    | No default model; bring your own agent                              |
+| [0010](0010-change-aware-selection.md)                   | Replay only what a change affects, from what workflows touch        |

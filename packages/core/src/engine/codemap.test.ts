@@ -18,6 +18,7 @@ describe('path normalisation', () => {
     expect(normalizePath('/orders/ord_1a2b3c4d5e6f')).toBe('/orders/*');
     expect(normalizePath('/')).toBe('/');
     expect(normalizePath('GET /')).toBe('/');
+    expect(normalizePath('add')).toBe('add');
   });
 
   it('extracts the method and the searchable prefix', () => {
@@ -26,6 +27,7 @@ describe('path normalisation', () => {
     expect(searchablePrefix('/api/todos/*')).toBe('/api/todos');
     expect(searchablePrefix('/users/*/edit')).toBe('/users');
     expect(searchablePrefix('/')).toBeUndefined();
+    expect(searchablePrefix('add')).toBeUndefined();
   });
 });
 
@@ -40,6 +42,8 @@ describe('code mapper', () => {
     writeFileSync(join(dir, 'src', 'routes', 'todos.js'), "router.post('/api/todos', add);\n");
     writeFileSync(join(dir, 'src', 'client.js'), "fetch('/api/todos').then(render);\n");
     writeFileSync(join(dir, 'src', 'about.js'), "export const about = 'nothing here';\n");
+    writeFileSync(join(dir, 'README.md'), 'The API lives at /api/todos.\n');
+    writeFileSync(join(dir, 'mutationworkflow.config.yaml'), 'codemap: [{ match: /api/todos }]\n');
     writeFileSync(join(dir, 'node_modules', 'dep', 'index.js'), "'/api/todos' in a dependency\n");
     writeFileSync(join(dir, '.mutationworkflow', 'reports', 'r.md'), 'Endpoints: `/api/todos`\n');
     writeFileSync(join(dir, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]));
@@ -47,7 +51,7 @@ describe('code mapper', () => {
 
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it('indexes text files outside ignored directories', () => {
+  it('indexes source files, leaving out ignored directories, documentation and its own config', () => {
     const index = indexRepository(dir);
     expect([...index.files.keys()].sort()).toEqual([
       'src/about.js',
@@ -76,6 +80,25 @@ describe('code mapper', () => {
       'src/routes/todos.js',
     ]);
     expect(mapper.filesFor({ urls: ['/'], endpoints: [] })).toEqual([]);
+  });
+
+  it('lets a rule with a method cover the collection, and maps command words through rules only', () => {
+    const mapper = createCodeMapper({
+      rootDir: dir,
+      rules: [
+        { match: 'POST /api/todos/**', files: ['src/routes/create.js'] },
+        { match: 'add', files: ['src/commands/add.js'] },
+      ],
+    });
+    expect(mapper.filesFor({ urls: [], endpoints: ['POST /api/todos'] })).toContain(
+      'src/routes/create.js',
+    );
+    expect(mapper.filesFor({ urls: [], endpoints: ['GET /api/todos'] })).not.toContain(
+      'src/routes/create.js',
+    );
+    expect(mapper.filesFor({ urls: [], endpoints: ['add', 'undo'] })).toEqual([
+      'src/commands/add.js',
+    ]);
   });
 
   it('reuses a supplied repository index', () => {

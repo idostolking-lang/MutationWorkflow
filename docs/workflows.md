@@ -27,6 +27,7 @@ Related: [README](../README.md) · [Configuration](configuration.md) · [Adapter
 | `expect`                 | assertion[]        | Final-state assertions, checked after the last step                     |
 | `tags`                   | string[]           | Free labels; mutations get `mutation` plus the operator id              |
 | `source`                 | object             | `{ file?, name?, framework? }`: the test this workflow was derived from |
+| `touches`                | object             | What its runs exercised: `{ urls, endpoints, files, updatedAt }`, below |
 | `fingerprint`            | string             | Identity of the workflow's behaviour, below                             |
 | `createdAt`, `updatedAt` | ISO 8601           |                                                                         |
 
@@ -177,7 +178,8 @@ such problems (and environment or triage failures) in its `errors` list and stil
 report.
 
 Which workflows run: all `active` and `pending-review` workflows of the selected targets, or
-only base workflows, or only mutations, or specific ids.
+only base workflows, or only mutations, or specific ids. A run can also be narrowed to the
+workflows a code change affects; see [What a workflow touches](#what-a-workflow-touches).
 
 ## Run status
 
@@ -209,10 +211,57 @@ a regression: the sequence worked when it was recorded.
 | `oracles[]`              | `{ oracle, verdict: pass \| fail \| skip, summary?, signature?, severity?, details? }` |
 | `evidenceIds`            | Evidence captured during the run                                                       |
 | `context`                | `{ jobId?, commit?, branch?, baseUrl?, mutated }`                                      |
+| `touched`                | `{ urls, endpoints }`: what this run exercised, from the adapter (empty when unknown)  |
 | `error`                  | Infrastructure error message when status is `error`                                    |
 
 `signature` on a signal is its message with volatile parts (timestamps, UUIDs, long hex ids,
 numbers, quoted strings) normalised, so the same error from different runs groups together.
+
+## What a workflow touches
+
+Every run records what the session exercised, as reported by the adapter
+([Adapters](adapters.md#footprints)): the pages or screens it visited (`urls`, paths without
+host) and the backend endpoints or commands it used (`endpoints`, such as `POST /api/todos` or
+`add`). The engine folds each run's footprint into the workflow's `touches`, which accumulates
+across runs:
+
+| Field       | Contents                                                                   |
+| ----------- | -------------------------------------------------------------------------- |
+| `urls`      | Every page path any run of the workflow visited, in first-seen order       |
+| `endpoints` | Every endpoint or command any run used, in first-seen order                |
+| `files`     | Source files or globs behind those pages and endpoints, from the code map  |
+| `updatedAt` | When the record last changed                                               |
+
+How it is learned:
+
+- After every replay, the run's footprint is merged into the workflow. A run of a mutation
+  variant also teaches its base, so a base workflow knows the endpoints its variants reach
+  (a repeated submit, a delete after a skipped step) even when its own sequence never does.
+- `files` is recomputed from the accumulated pages and endpoints on every merge, by the code
+  map: explicit `targets[].codemap` rules ([Configuration](configuration.md#targetscodemap)),
+  plus a search of the repository for files that mention the static part of each path
+  literally. `/api/todos/42` is normalised to `/api/todos/*` first, and `/api/todos` is
+  searched for, because ids never appear in source code.
+- A run that touched nothing (an adapter without footprints, a session that failed to open)
+  teaches nothing. Learning happens on replay (`run`) only, not during exploration.
+
+How it drives replay: given a change (a list of files, or a git range), each base workflow of a
+target is one of
+
+| Class        | Meaning                                                                       |
+| ------------ | ----------------------------------------------------------------------------- |
+| `impacted`   | A changed file equals one of its `files`, lies under one, or matches its glob |
+| `unknown`    | No `files` yet: it never ran, or nothing it touched maps to a file            |
+| `unaffected` | It has `files`, and none of them covers a changed file                        |
+
+A change-aware run replays the impacted and unknown bases and all their variants, and skips the
+unaffected ones. Variants are not classified on their own: they follow their base. Everything
+runs when a shared file changed (a dependency manifest or lockfile, `tsconfig*.json`, Vite,
+Next, webpack or Tailwind config, `Dockerfile`, `docker-compose*.yml`, `Makefile`, a Prisma
+schema or a `migrations/` directory) or when no workflow of the target is known to be
+unaffected, since a full run then costs the same and teaches more. Without an explicit change,
+the files changed since the commit of the last run are used. See
+[Architecture](architecture.md#change-aware-selection) for the full rules.
 
 ## Evidence
 

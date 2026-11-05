@@ -20,6 +20,7 @@ import { getFindingDetail, getWorkflowDetail, listWorkflows, readEvidence } from
 import {
   formatFindingDetail,
   formatFindings,
+  formatImpact,
   formatJobDetail,
   formatJobs,
   formatQuestions,
@@ -30,7 +31,7 @@ import {
   formatWorkflows,
 } from '../format.js';
 import { writeLatestReport } from '../report.js';
-import { findingView, jobView, workflowView } from '../views.js';
+import { findingView, impactView, jobView, workflowView } from '../views.js';
 import { safe, textResult } from './result.js';
 
 const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true } as const;
@@ -80,6 +81,32 @@ export function registerMemoryTools(server: McpServer, engine: Engine): void {
       const run = await engine.store.runs.get(args.id);
       if (!run) throw new MutationWorkflowError('NOT_FOUND', `No run with id ${args.id}`);
       return textResult(formatRunDetail(run), run);
+    }),
+  );
+
+  server.registerTool(
+    'mw_impact',
+    {
+      title: 'What a change affects',
+      description:
+        "Which base workflows a code change affects, from the pages, endpoints and files earlier runs learned they touch: affected, never run (unknown) and unaffected, per target. Nothing runs; mw_run with changed: true replays the affected and unknown ones. Default change: the last run's commit..HEAD.",
+      inputSchema: {
+        files: z
+          .array(z.string())
+          .optional()
+          .describe('Changed files relative to the project root; wins over range'),
+        range: z.string().optional().describe('Git range, e.g. "abc123..HEAD"'),
+        targets: z.array(z.string()).optional().describe('Target ids; all targets when omitted'),
+      },
+      annotations: READ,
+    },
+    safe(async (args) => {
+      const report = await engine.impact({
+        ...(args.files ? { files: args.files } : {}),
+        ...(args.range !== undefined ? { range: args.range } : {}),
+        ...(args.targets ? { targetIds: args.targets } : {}),
+      });
+      return textResult(formatImpact(report), impactView(report));
     }),
   );
 

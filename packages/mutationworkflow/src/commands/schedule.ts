@@ -7,6 +7,7 @@ import {
 import type { Command } from 'commander';
 import { Cron } from 'croner';
 import type { Cli } from '../context.js';
+import { formatSelection } from '../format.js';
 import { requireTargets, runJob } from '../jobs.js';
 import { summarizeMutate, summarizeRun } from '../views.js';
 
@@ -14,6 +15,8 @@ interface CronEntry {
   expression: string;
   action: ScheduleAction;
   target?: string;
+  /** Replay only what changed since the last run (`run` and `cycle`). */
+  changedOnly?: boolean;
 }
 
 /**
@@ -36,7 +39,7 @@ export async function runScheduledAction(
     engine,
     {
       kind: entry.action === 'cycle' ? 'cycle' : entry.action,
-      params: { schedule: entry.expression, targets: ids },
+      params: { schedule: entry.expression, targets: ids, changedOnly: entry.changedOnly === true },
       work: async (job) => {
         const outcome: Record<string, unknown> = {};
         for (const id of explore ? ids : []) {
@@ -58,10 +61,12 @@ export async function runScheduledAction(
           const summary = await engine.run({
             targetIds: ids,
             trigger: 'schedule',
+            ...(entry.changedOnly ? { changed: {} } : {}),
             jobId: job.job.id,
             signal: job.signal,
           });
           const s = summary.stats;
+          for (const selection of summary.selection ?? []) log(`  ${formatSelection(selection)}`);
           log(
             `  ran ${s.total}: ${s.passed} passed, ${s.failed} failed, ${s.blocked} blocked, ${s.error} error; ${summary.findings.length} finding(s) touched`,
           );
@@ -95,7 +100,7 @@ export function registerSchedule(program: Command, cli: Cli): void {
         // One tick at a time: environments of different entries would compete for ports.
         let current: Promise<void> | undefined;
         const tick = async (entry: CronEntry) => {
-          const label = `${entry.action}${entry.target ? ` ${entry.target}` : ''} (${entry.expression})`;
+          const label = `${entry.action}${entry.target ? ` ${entry.target}` : ''}${entry.changedOnly ? ' changed only' : ''} (${entry.expression})`;
           const now = new Date().toISOString();
           if (current) {
             cli.output.err(`${now} skipped ${label}: the previous tick is still running`);

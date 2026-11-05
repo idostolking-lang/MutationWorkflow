@@ -300,6 +300,7 @@ export function describe(): AdapterDescription {
 | `observe()`                          | `{ summary, url?, title?, screenshot? }`: a compact text rendering agents can act on                                                                          |
 | `drainSignals()`                     | Error signals since the previous call: `{ kind, message, signature, stepId?, details?, at }`. Use `normalizeSignature()` from core for `signature`            |
 | `capture(kind, label?)`              | `screenshot`, `dom` or `output`; return `undefined` when unsupported                                                                                          |
+| `footprint()`                        | Optional. What the session touched so far: `{ urls, endpoints }`; see [Footprints](#footprints)                                                               |
 | `close()`                            | Idempotent; release everything the session started                                                                                                            |
 
 ### Evidence
@@ -316,6 +317,42 @@ return { status: 'blocked', message: 'Button "Pay" is disabled', evidence: [shot
 `file()` writes `NNN-<label>.<ext>` into the session directory (`runs/<runId>` or
 `explore/<sessionId>`) and returns a record with a path relative to the evidence root; `text()`
 stores small content inline. The engine persists every record the sink produced.
+
+### Footprints
+
+`footprint()` tells the engine what a session exercised, so a code change can be matched to the
+workflows worth replaying ([Workflows](workflows.md#what-a-workflow-touches)). It is optional;
+a session without it reports nothing, and its workflows stay `unknown` and are replayed on every
+change-aware run.
+
+```ts
+footprint(): Footprint; // { urls: string[]; endpoints: string[] }
+```
+
+- `urls`: paths of the pages or screens visited, without scheme or host (`/settings`).
+- `endpoints`: backend endpoints as `"<METHOD> <path>"` (`POST /api/todos`), or command
+  words for applications without HTTP (`add`).
+- Return entries that are unique, in first-seen order, and only for what is in scope. Leave
+  out static assets and anything the application does not implement itself. Keep the lists
+  bounded (the built-in adapters keep 200 entries each).
+- Ids in paths may stay as they are: the engine normalises numeric, UUID, long hex and
+  prefixed-id segments to `*` before mapping them to files.
+
+The executor reads the footprint once the final expectations and invariants have been checked
+(and, best effort, when the run ended in an infrastructure error) and stores it on the run as
+`touched`. What the built-in adapters record:
+
+- `web`: as `urls`, the path of every main-frame navigation to an in-scope http(s) URL (loads,
+  links, reloads, back and forward, history API changes); frames other than the main frame and
+  `about:blank` add nothing. As `endpoints`, `METHOD /path` for every in-scope `fetch` or XHR
+  request, whatever its method, and for every other in-scope request that is not a `GET` (a
+  form post, for example). Document loads and static assets (scripts, styles, images, fonts,
+  media, text tracks, manifests) are never endpoints. Query strings and fragments are dropped.
+  Each list keeps the first 200 distinct entries.
+- `cli`: no `urls`. As `endpoints`, the command word of each `write` action (its first token,
+  lowercased) and of each `exec` action (its first per-action argument, or else the basename
+  of the configured `command`), up to 200 distinct words. `start`, `wait`, `signal` and `close`
+  add nothing.
 
 ### Mutation hints
 
