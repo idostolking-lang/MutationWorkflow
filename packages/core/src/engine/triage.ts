@@ -116,7 +116,9 @@ function describeContext(workflow: Workflow, run: Run, summary: string | undefin
   if (failedStep) {
     const step = workflow.steps[failedStep.index];
     lines.push(
-      `Step ${failedStep.index + 1} (${step ? describeAction(step.action) : failedStep.stepId}) ${failedStep.status}${failedStep.message ? `: ${failedStep.message}` : ''}.`,
+      `Step ${failedStep.index + 1} (${step ? describeAction(step.action) : failedStep.stepId}) ${failedStep.status}${
+        failedStep.message ? `: ${failedStep.message}` : ''
+      }.`,
     );
   }
   return lines.join('\n').trim();
@@ -210,7 +212,9 @@ async function triageBatch(deps: TriageDeps, batch: Finding[]): Promise<Finding[
   const result = await runtime.run({
     role: 'triager',
     system: triagerPrompt({ target }),
-    task: `Triage the following ${batch.length} finding(s).\n\n${dossiers.join('\n\n---\n\n')}`,
+    task: `Triage the following ${batch.length} finding(s). Their ids are: ${batch
+      .map((f) => f.id)
+      .join(', ')}.\n\n${dossiers.join('\n\n---\n\n')}`,
     tools,
     output: TriageDecisionSchema,
     jobId: deps.jobId,
@@ -223,7 +227,7 @@ async function triageBatch(deps: TriageDeps, batch: Finding[]): Promise<Finding[
     );
     return [];
   }
-  return applyDecisions(store, batch, result.output, resolved.model, logger);
+  return applyDecisions(store, batch, result.output as TriageDecision, resolved.model, logger);
 }
 
 async function dossier(store: Store, finding: Finding): Promise<string> {
@@ -240,8 +244,30 @@ async function dossier(store: Store, finding: Finding): Promise<string> {
     finding.summary,
   ];
   if (workflow) {
-    lines.push('', `Workflow "${workflow.title}" (${workflow.origin}): ${workflow.intent}`);
+    const confirmed =
+      workflow.status === 'pending-review'
+        ? 'pending review: its expectations were written by an agent and nobody confirmed them yet'
+        : workflow.origin === 'imported-test'
+          ? 'translated from an existing test, so its expectations are confirmed intent'
+          : 'confirmed by the team';
+    lines.push(
+      '',
+      `Workflow "${workflow.title}" (${workflow.origin}, ${confirmed}): ${workflow.intent}`,
+    );
     if (workflow.mutation) lines.push(`Mutation: ${workflow.mutation.description}`);
+    if (workflow.parentId) {
+      const base = await store.workflows.get(workflow.parentId);
+      const baseRun = await store.runs.latestForWorkflow(workflow.parentId);
+      if (base) {
+        lines.push(
+          `Base workflow "${base.title}" last ran ${baseRun ? `${baseRun.status} on ${baseRun.finishedAt}` : 'never'}; ${
+            baseRun?.status === 'passed'
+              ? 'the unmodified sequence works, so compare against it'
+              : 'the unmodified sequence itself is not healthy'
+          }.`,
+        );
+      }
+    }
     for (const [index, step] of workflow.steps.entries()) {
       const outcome = run?.steps.find((s) => s.stepId === step.id);
       const status = outcome
@@ -304,6 +330,44 @@ function loadEvidence(
   }
 }
 
+/**
+ * Accept `duplicateOf` only when it names another finding of the same target that is still
+ * open or confirmed, is not itself declared a duplicate in this batch, and exists. Anything else
+ * (an invented id, a cycle) is ignored so a real bug is never dismissed on a typo.
+ */
+async function resolvePrimary(
+  store: Store,
+  batch: Finding[],
+  decision: TriageDecision,
+  finding: Finding,
+  duplicateOf: string | undefined,
+  logger: Logger,
+): Promise<Finding | undefined> {
+  if (!duplicateOf || duplicateOf === finding.id) return undefined;
+  const declaredDuplicate = decision.decisions.some(
+    (d) => d.findingId === duplicateOf && d.duplicateOf && d.duplicateOf !== d.findingId,
+  );
+  if (declaredDuplicate) {
+    logger.warn(
+      `Ignoring duplicateOf ${duplicateOf} for ${finding.id}: the primary is itself marked duplicate`,
+    );
+    return undefined;
+  }
+  const primary =
+    batch.find((f) => f.id === duplicateOf) ?? (await store.findings.get(duplicateOf));
+  if (
+    !primary ||
+    primary.targetId !== finding.targetId ||
+    !['open', 'confirmed'].includes(primary.status)
+  ) {
+    logger.warn(
+      `Ignoring duplicateOf ${duplicateOf} for ${finding.id}: no such open finding for this target`,
+    );
+    return undefined;
+  }
+  return primary;
+}
+
 async function applyDecisions(
   store: Store,
   batch: Finding[],
@@ -315,15 +379,23 @@ async function applyDecisions(
   const updated: Finding[] = [];
   const now = nowIso();
   for (const entry of decision.decisions) {
-    const finding = byId.get(entry.findingId);
-    if (!finding) {
+    const snapshot = byId.get(entry.findingId);
+    if (!snapshot) {
       logger.warn(`Triager referenced unknown finding ${entry.findingId}`);
       continue;
     }
-    const duplicateOf =
-      entry.duplicateOf && entry.duplicateOf !== finding.id ? entry.duplicateOf : undefined;
+    // Re-read: a concurrent run may have added occurrences or runs while the agent was thinking.
+    const finding = (await store.findings.get(snapshot.id)) ?? snapshot;
+    const primary = await resolvePrimary(
+      store,
+      batch,
+      decision,
+      finding,
+      entry.duplicateOf,
+      logger,
+    );
     const status: Finding['status'] =
-      duplicateOf || entry.verdict === 'not-a-bug' ? 'dismissed' : finding.status;
+      primary || entry.verdict === 'not-a-bug' ? 'dismissed' : finding.status;
     const next = FindingSchema.parse({
       ...finding,
       title: entry.title,
@@ -331,31 +403,29 @@ async function applyDecisions(
       severity: entry.severity,
       status,
       triage: { state: 'done', verdict: entry.verdict, rationale: entry.rationale, model, at: now },
-      notes: duplicateOf
-        ? `${finding.notes ? `${finding.notes}\n` : ''}Duplicate of ${duplicateOf}.`
+      notes: primary
+        ? `${finding.notes ? `${finding.notes}\n` : ''}Duplicate of ${primary.id}.`
         : finding.notes,
     });
     await store.findings.update(next);
     updated.push(next);
-    if (duplicateOf) {
-      const primary = await store.findings.get(duplicateOf);
-      if (primary) {
-        await store.findings.update(
-          FindingSchema.parse({
-            ...primary,
-            runIds: unique([...primary.runIds, ...finding.runIds]),
-            workflowIds: unique([...primary.workflowIds, ...finding.workflowIds]),
-            occurrences: primary.occurrences + finding.occurrences,
-          }),
-        );
-      }
+    if (primary) {
+      const fresh = (await store.findings.get(primary.id)) ?? primary;
+      await store.findings.update(
+        FindingSchema.parse({
+          ...fresh,
+          runIds: unique([...fresh.runIds, ...finding.runIds]),
+          workflowIds: unique([...fresh.workflowIds, ...finding.workflowIds]),
+          occurrences: fresh.occurrences + finding.occurrences,
+        }),
+      );
     }
     if (entry.verdict === 'needs-human') {
       const question: Question = QuestionSchema.parse({
         id: newId('q'),
         targetId: finding.targetId,
         kind: 'is-this-a-bug',
-        question: `${entry.title}\n\n${entry.summary}\n\nTriager: ${entry.rationale}`,
+        question: `${entry.title}\n\n${entry.summary}\n\nTriager: ${entry.rationale}\n\nAnswer "bug" if the application misbehaved, "confirm" if this behaviour is intended, or "dismiss" to ignore it.`,
         context: {
           findingId: finding.id,
           workflowId: finding.reproduction?.workflowId,

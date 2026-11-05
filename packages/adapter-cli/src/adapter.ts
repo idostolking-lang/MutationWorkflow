@@ -12,6 +12,7 @@ import { MutationWorkflowError } from '@mutationworkflow/core';
 import { ACTION_EXAMPLES, CliActionSchemas } from './actions.js';
 import { ASSERTION_EXAMPLES, CliAssertionSchemas } from './assertions.js';
 import { parseCliOptions, type ResolvedCliOptions } from './options.js';
+import { actionArgsProblem } from './process.js';
 import { CliSession } from './session.js';
 import { parseByType, specsOf } from './vocabulary.js';
 
@@ -41,6 +42,10 @@ export class CliAdapter implements Adapter {
         'INVALID_INPUT',
         'wait.prompt needs the target option promptPattern; wait for output instead',
       );
+    }
+    if (parsed.type === 'start' || parsed.type === 'exec') {
+      const problem = actionArgsProblem(this.options.shell, parsed.args ?? []);
+      if (problem) throw new MutationWorkflowError('INVALID_INPUT', problem);
     }
     return parsed;
   }

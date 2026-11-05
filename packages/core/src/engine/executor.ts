@@ -9,13 +9,13 @@ import {
   type AssertionScope,
   type Evidence,
   newId,
-  normalizeSteps,
   nowIso,
   type Run,
   type RunContext,
   RunSchema,
   type RunStatus,
   type RunTrigger,
+  type Signal,
   type Step,
   type StepResult,
   type StepStatus,
@@ -24,6 +24,7 @@ import {
 } from '../schema/index.js';
 import { errorMessage } from '../util/errors.js';
 import type { Logger } from '../util/logger.js';
+import { applyIdentity } from './identity.js';
 
 export interface ExecuteOptions {
   workflow: Workflow;
@@ -43,16 +44,21 @@ export interface ExecutionResult {
   evidence: Evidence[];
 }
 
+const CLOSE_TIMEOUT_MS = 10_000;
+
 /**
  * Replay one workflow in a fresh adapter session with no model involved: identity setup, each
  * step with its expectations, final expectations, invariants, error signals, then the oracles.
- * The result is a complete, self-contained Run record.
+ * Never throws: every problem, including an adapter that hangs or a session that cannot open,
+ * ends up in a complete Run record.
  */
 export async function executeWorkflow(options: ExecuteOptions): Promise<ExecutionResult> {
   const { workflow, target, adapter, config, logger } = options;
   const runId = newId('run');
   const startedAt = nowIso();
   const started = Date.now();
+  const deadline = started + config.execution.workflowTimeoutMs;
+  const remaining = () => deadline - Date.now();
   const sink = new EvidenceSink({
     rootDir: options.evidenceRoot,
     sessionDir: `runs/${runId}`,
@@ -60,42 +66,51 @@ export async function executeWorkflow(options: ExecuteOptions): Promise<Executio
   });
   const steps: StepResult[] = [];
   const assertions: AssertionResult[] = [];
-  let signals: Run['signals'] = [];
+  let signals: Signal[] = [];
   let runError: string | undefined;
-
-  const session = await adapter.open({
-    sessionId: runId,
-    runId,
-    evidence: sink,
-    screenshots: config.execution.screenshots,
-    stepTimeoutMs: config.execution.stepTimeoutMs,
-    assertionTimeoutMs: config.execution.assertionTimeoutMs,
-    scope: target.scope,
-    logger,
-  });
-
-  const deadline = started + config.execution.workflowTimeoutMs;
-  const timedOut = () => Date.now() > deadline;
+  let session: AdapterSession | undefined;
 
   try {
-    await setUpIdentity(session, workflow, target);
+    session = await withTimeout(
+      adapter.open({
+        sessionId: runId,
+        runId,
+        evidence: sink,
+        screenshots: config.execution.screenshots,
+        stepTimeoutMs: config.execution.stepTimeoutMs,
+        assertionTimeoutMs: config.execution.assertionTimeoutMs,
+        scope: target.scope,
+        logger,
+      }),
+      remaining(),
+      'opening the session',
+    );
+    await withTimeout(
+      applyIdentity(session, target, workflow.identity),
+      remaining(),
+      'setting up the identity',
+    );
+
     let stopped = false;
     for (const [index, step] of workflow.steps.entries()) {
-      if (stopped || timedOut()) {
-        steps.push({ stepId: step.id, index, status: 'skipped', durationMs: 0, evidenceIds: [] });
-        if (!stopped) runError = `Workflow exceeded ${config.execution.workflowTimeoutMs} ms`;
+      if (!stopped && remaining() <= 0) {
+        runError = `Workflow exceeded ${config.execution.workflowTimeoutMs} ms`;
         stopped = true;
+      }
+      if (stopped) {
+        steps.push({ stepId: step.id, index, status: 'skipped', durationMs: 0, evidenceIds: [] });
         continue;
       }
-      const result = await performStep(session, step, index, assertions, target);
+      const result = await performStep(session, step, index, assertions, target, remaining);
       steps.push(result);
       if (result.status !== 'passed') stopped = true;
     }
     if (!stopped) {
-      await checkAll(session, workflow.expect, 'final', undefined, assertions);
+      await checkAll(session, workflow.expect, 'final', undefined, assertions, remaining);
     }
-    await checkInvariants(session, target, 'after-workflow', undefined, assertions);
+    await checkInvariants(session, target, 'after-workflow', undefined, assertions, remaining);
     signals = session.drainSignals();
+
     const troubled =
       steps.some((s) => s.status !== 'passed' && s.status !== 'skipped') ||
       assertions.some((a) => !a.passed) ||
@@ -103,20 +118,27 @@ export async function executeWorkflow(options: ExecuteOptions): Promise<Executio
     if (troubled && config.execution.screenshots !== 'never') {
       // Failures through signals or expectations leave no failed action behind, so capture the
       // final state explicitly for the triager and the report.
-      await session.capture('screenshot', 'final-state').catch(() => undefined);
+      await withTimeout(
+        session.capture('screenshot', 'final-state'),
+        CLOSE_TIMEOUT_MS,
+        'capturing',
+      ).catch(() => undefined);
     }
   } catch (error) {
     runError = errorMessage(error);
     logger.error(`Run ${runId} failed: ${runError}`);
     try {
-      signals = session.drainSignals();
+      signals = session?.drainSignals() ?? [];
     } catch {
       // The session is already broken; signals are a bonus here.
     }
   } finally {
-    await session.close().catch((error: unknown) => {
-      logger.warn(`Could not close session for ${runId}: ${errorMessage(error)}`);
-    });
+    if (session) {
+      await withTimeout(session.close(), CLOSE_TIMEOUT_MS, 'closing the session').catch(
+        (error: unknown) =>
+          logger.warn(`Could not close session for ${runId}: ${errorMessage(error)}`),
+      );
+    }
   }
 
   const mutated = workflow.origin === 'mutation';
@@ -131,7 +153,6 @@ export async function executeWorkflow(options: ExecuteOptions): Promise<Executio
     config: config.oracles,
   });
 
-  const finishedAt = nowIso();
   const run = RunSchema.parse({
     id: runId,
     workflowId: workflow.id,
@@ -139,7 +160,7 @@ export async function executeWorkflow(options: ExecuteOptions): Promise<Executio
     trigger: options.trigger,
     status: deriveStatus(steps, assertions, oracles, runError),
     startedAt,
-    finishedAt,
+    finishedAt: nowIso(),
     durationMs: Date.now() - started,
     steps,
     assertions,
@@ -152,54 +173,41 @@ export async function executeWorkflow(options: ExecuteOptions): Promise<Executio
   return { run, evidence: [...sink.all] };
 }
 
-async function setUpIdentity(
-  session: AdapterSession,
-  workflow: Workflow,
-  target: TargetConfig,
-): Promise<void> {
-  if (!workflow.identity) return;
-  const identity = target.identities.find((candidate) => candidate.id === workflow.identity);
-  if (!identity) {
-    throw new Error(`Identity "${workflow.identity}" is not defined for target "${target.id}"`);
-  }
-  for (const step of normalizeSteps(identity.steps)) {
-    const outcome = await session.perform(step.action, { stepId: `identity:${step.id}` });
-    if (outcome.status !== 'ok') {
-      throw new Error(
-        `Identity "${identity.id}" setup failed at ${step.action.type}: ${outcome.message ?? outcome.status}`,
-      );
-    }
-  }
-}
-
 async function performStep(
   session: AdapterSession,
   step: Step,
   index: number,
   assertions: AssertionResult[],
   target: TargetConfig,
+  remaining: () => number,
 ): Promise<StepResult> {
   const started = Date.now();
-  const outcome = await session.perform(step.action, { stepId: step.id, index });
-  let status: StepStatus =
-    outcome.status === 'ok' ? 'passed' : outcome.status === 'blocked' ? 'blocked' : 'error';
-  let message = outcome.message;
+  let status: StepStatus;
+  let message: string | undefined;
+  let evidenceIds: string[] = [];
+  try {
+    const outcome = await withTimeout(
+      session.perform(step.action, { stepId: step.id, index }),
+      remaining(),
+      `performing step ${index + 1}`,
+    );
+    status =
+      outcome.status === 'ok' ? 'passed' : outcome.status === 'blocked' ? 'blocked' : 'error';
+    message = outcome.message;
+    evidenceIds = outcome.evidence.map((e) => e.id);
+  } catch (error) {
+    status = 'error';
+    message = errorMessage(error);
+  }
   if (status === 'passed') {
-    const failed = await checkAll(session, step.expect, 'step', step.id, assertions);
-    await checkInvariants(session, target, 'after-step', step.id, assertions);
+    const failed = await checkAll(session, step.expect, 'step', step.id, assertions, remaining);
+    await checkInvariants(session, target, 'after-step', step.id, assertions, remaining);
     if (failed) {
       status = 'failed';
       message = failed;
     }
   }
-  return {
-    stepId: step.id,
-    index,
-    status,
-    durationMs: Date.now() - started,
-    message,
-    evidenceIds: outcome.evidence.map((e) => e.id),
-  };
+  return { stepId: step.id, index, status, durationMs: Date.now() - started, message, evidenceIds };
 }
 
 /** Check assertions, record the results, and return the first failure message if any. */
@@ -209,12 +217,13 @@ async function checkAll(
   scope: AssertionScope,
   stepId: string | undefined,
   into: AssertionResult[],
+  remaining: () => number,
 ): Promise<string | undefined> {
   let firstFailure: string | undefined;
   for (const assertion of list) {
     let result: { passed: boolean; message?: string };
     try {
-      result = await session.check(assertion);
+      result = await withTimeout(session.check(assertion), remaining(), 'checking an assertion');
     } catch (error) {
       result = {
         passed: false,
@@ -236,6 +245,7 @@ async function checkInvariants(
   when: 'after-step' | 'after-workflow',
   stepId: string | undefined,
   into: AssertionResult[],
+  remaining: () => number,
 ): Promise<void> {
   const checks = target.invariants
     .filter((invariant) => invariant.when === when)
@@ -243,7 +253,7 @@ async function checkInvariants(
       ...invariant.check,
       description: invariant.description ?? invariant.id,
     }));
-  await checkAll(session, checks, 'invariant', stepId, into);
+  await checkAll(session, checks, 'invariant', stepId, into, remaining);
 }
 
 function deriveStatus(
@@ -258,4 +268,25 @@ function deriveStatus(
   if (oracles.some((o) => o.verdict === 'fail')) return 'failed';
   if (steps.some((s) => s.status === 'blocked')) return 'blocked';
   return 'passed';
+}
+
+/** Reject when `promise` does not settle within `ms`; the underlying work is not cancelled. */
+export function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  const limit = Math.max(1, ms);
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Timed out after ${limit} ms while ${what}`)),
+      limit,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }

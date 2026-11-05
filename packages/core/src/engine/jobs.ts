@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { type Job, type JobKind, JobSchema, newId, nowIso } from '../schema/index.js';
 import type { JobFilter, Store } from '../store/types.js';
 import { errorMessage } from '../util/errors.js';
@@ -46,6 +47,7 @@ export class JobManager {
       kind,
       status: 'running',
       params,
+      owner: { pid: process.pid, host: hostname() },
       createdAt: nowIso(),
       startedAt: nowIso(),
     });
@@ -74,10 +76,13 @@ export class JobManager {
     return { job: final, result: outcome.value };
   }
 
-  /** Mark jobs left `running` by a previous process as failed. Called once at startup. */
+  /**
+   * Mark jobs left `running` by a process that no longer exists on this machine as failed. Jobs
+   * owned by live processes or by other hosts are left alone. Called once at startup.
+   */
   async recover(): Promise<number> {
     const stale = (await this.store.jobs.list({ status: ['queued', 'running'] })).filter(
-      (job) => !this.running.has(job.id),
+      (job) => !this.running.has(job.id) && ownerIsGone(job),
     );
     for (const job of stale) {
       await this.store.jobs.update(
@@ -159,5 +164,18 @@ export class JobManager {
     } finally {
       this.running.delete(job.id);
     }
+  }
+}
+
+/** True when the job's owner process is known to be gone from this machine. */
+function ownerIsGone(job: Job): boolean {
+  if (!job.owner) return true;
+  if (job.owner.host !== hostname() || job.owner.pid === process.pid) return false;
+  try {
+    process.kill(job.owner.pid, 0);
+    return false;
+  } catch (error) {
+    // EPERM means the process exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code !== 'EPERM';
   }
 }

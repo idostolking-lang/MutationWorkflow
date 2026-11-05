@@ -100,3 +100,22 @@ export const TargetConfigSchema = z.object({
 });
 export type TargetConfig = z.infer<typeof TargetConfigSchema>;
 export type TargetConfigInput = z.input<typeof TargetConfigSchema>;
+
+/**
+ * The target without anything that may hold credentials: identity steps (logins) and the raw
+ * option maps that carry environment variables or browser launch options. Used for records
+ * that leave the process, such as the database and prompts.
+ */
+export function redactTarget(target: TargetConfig): TargetConfig {
+  const {
+    env: _env,
+    launchOptions: _launch,
+    storageStatePath: _state,
+    ...options
+  } = target.options;
+  return {
+    ...target,
+    options,
+    identities: target.identities.map((identity) => ({ ...identity, steps: [] })),
+  };
+}

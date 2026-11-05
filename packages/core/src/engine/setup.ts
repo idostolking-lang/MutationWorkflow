@@ -1,6 +1,6 @@
+import { existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
-import type { AdapterDescription } from '../adapter/types.js';
 import {
   type InspectionReport,
   InspectionReportSchema,
@@ -16,6 +16,7 @@ import {
   nowIso,
   type Question,
   QuestionSchema,
+  redactTarget,
   type TargetConfig,
   type Workflow,
 } from '../schema/index.js';
@@ -24,6 +25,7 @@ import { errorMessage, MutationWorkflowError } from '../util/errors.js';
 import { writeFileAtomic } from '../util/fs.js';
 import type { Logger } from '../util/logger.js';
 import type { AdapterRegistry } from './adapters.js';
+import { workflowProblem } from './identity.js';
 import { repositoryTools } from './repo-tools.js';
 
 export interface SetupDeps {
@@ -43,7 +45,11 @@ export interface SetupDeps {
 
 export interface SetupOptions {
   projectName?: string;
-  /** Start each proposed environment once to confirm the start command works (default true). */
+  /**
+   * Start each proposed environment once to confirm its start command works. Off by default:
+   * the commands were written by a model, so review them in the config first. Never done when a
+   * config already exists (the proposal is written for a human to merge).
+   */
   validate?: boolean;
 }
 
@@ -93,10 +99,13 @@ export async function setup(deps: SetupDeps, options: SetupOptions = {}): Promis
     return false;
   });
 
+  const defaultPath = deps.configPath ?? join(rootDir, 'mutationworkflow.config.yaml');
+  // Re-check on disk: the config may have appeared since this engine was created.
+  const configExists = Boolean(deps.existing) || existsSync(defaultPath);
   let configPath: string;
   let configAction: SetupResult['configAction'];
-  if (!deps.existing) {
-    configPath = deps.configPath ?? join(rootDir, 'mutationworkflow.config.yaml');
+  if (!configExists) {
+    configPath = defaultPath;
     writeConfigFile(configPath, {
       version: 1,
       project: { name: projectName, description: report.summary },
@@ -108,7 +117,11 @@ export async function setup(deps: SetupDeps, options: SetupOptions = {}): Promis
     configPath = join(rootDir, '.mutationworkflow', 'setup-proposal.yaml');
     writeFileAtomic(
       configPath,
-      `# Proposal from "mw setup". Merge what you want into your config file.\n${stringifyYaml({ targets, features: report.features, risks: report.risks })}`,
+      `# Proposal from "mw setup". Merge what you want into your config file.\n${stringifyYaml({
+        targets,
+        features: report.features,
+        risks: report.risks,
+      })}`,
     );
     configAction = 'proposal-written';
     logger.info(`Config already exists; proposal written to ${configPath}`);
@@ -119,7 +132,7 @@ export async function setup(deps: SetupDeps, options: SetupOptions = {}): Promis
   for (const target of targets) {
     if (!knownTargets.has(target.id)) {
       knownTargets.set(target.id, target);
-      await store.targets.upsert(target);
+      await store.targets.upsert(redactTarget(target));
     }
   }
 
@@ -140,9 +153,12 @@ export async function setup(deps: SetupDeps, options: SetupOptions = {}): Promis
   }
 
   const validation: SetupResult['validation'] = [];
-  if (options.validate !== false) {
+  if (options.validate === true && configAction === 'created') {
     for (const target of targets.filter((t) => t.environment.start)) {
       if (deps.signal?.aborted) break;
+      logger.info(
+        `Validating start command for "${target.id}": ${target.environment.start?.command}`,
+      );
       const outcome = await validateEnvironment(deps.environments, target);
       validation.push(outcome);
       if (!outcome.ok) {
@@ -179,15 +195,14 @@ async function seedWorkflows(
         origin,
         status: origin === 'imported-test' ? 'active' : 'pending-review',
       });
-      const adapter = await deps.registry.forTarget(target).catch(() => undefined);
-      if (adapter) {
-        for (const step of workflow.steps) adapter.validateAction(step.action);
-        for (const assertion of [...workflow.expect, ...workflow.steps.flatMap((s) => s.expect)]) {
-          adapter.validateAssertion(assertion);
-        }
-      }
     } catch (error) {
       logger.warn(`Skipping seed workflow "${draft.title}": ${errorMessage(error)}`);
+      continue;
+    }
+    const adapter = await deps.registry.forTarget(target).catch(() => undefined);
+    const problem = adapter ? workflowProblem(adapter, workflow) : undefined;
+    if (problem) {
+      logger.warn(`Skipping seed workflow "${draft.title}": ${problem}`);
       continue;
     }
     if (await store.workflows.getByFingerprint(target.id, workflow.fingerprint)) continue;
@@ -227,5 +242,3 @@ async function validateEnvironment(
     return { targetId: target.id, ok: false, message: errorMessage(error) };
   }
 }
-
-export type { AdapterDescription };

@@ -14,6 +14,7 @@ import { type AgentTool, defineTool, fail, ok } from '../agents/tools.js';
 import type { Config } from '../config/schema.js';
 import {
   ActionSchema,
+  type Assertion,
   AssertionSchema,
   createWorkflow,
   type Evidence,
@@ -31,6 +32,7 @@ import type { Store } from '../store/types.js';
 import { errorMessage } from '../util/errors.js';
 import type { Logger } from '../util/logger.js';
 import { truncate } from '../util/text.js';
+import { applyIdentity } from './identity.js';
 
 export interface ExploreDeps {
   store: Store;
@@ -57,6 +59,8 @@ export interface ExploreResult {
   questions: Question[];
   summaries: ExplorationSummary[];
   stoppedBecause: StopCause[];
+  /** Explorers that failed outright (session could not open, runtime error). */
+  errors: string[];
 }
 
 /** Default angles when the operator gives no focus, so parallel explorers do not overlap. */
@@ -69,8 +73,10 @@ const ANGLES = [
 
 /**
  * Run one or more explorer agents against a live target. Each explorer drives its own isolated
- * adapter session, records every action it performs, and turns coherent journeys into
- * workflows that enter memory as "pending review" together with a question for the team.
+ * adapter session, records every successful action, and turns coherent journeys into workflows
+ * that enter memory as "pending review" together with a question for the team. A fatal failure
+ * in one explorer (its session cannot open, the runtime breaks) stops the others, since the
+ * environment is probably gone.
  */
 export async function explore(
   deps: ExploreDeps,
@@ -88,29 +94,36 @@ export async function explore(
     parentId: null,
     status: ['active', 'pending-review'],
   });
-  const shared = {
+  const shared: SharedState = {
     titles: new Set(known.map((w) => w.title)),
     saved: 0,
     budget: total,
   };
-  const assignments = assign(focus, explorers);
+  const fatal = new AbortController();
+  const signal = deps.signal ? AbortSignal.any([deps.signal, fatal.signal]) : fatal.signal;
   const description = deps.adapter.describe();
-  const results = await Promise.all(
-    assignments.map((assignment, index) =>
-      runExplorer(deps, {
-        assignment,
-        index,
-        description,
-        shared,
-        maxWorkflows: Math.ceil(total / explorers),
+  const settled = await Promise.allSettled(
+    assign(focus, explorers).map((assignment, index) =>
+      runExplorer(
+        { ...deps, signal },
+        { assignment, index, description, shared, maxWorkflows: Math.ceil(total / explorers) },
+      ).catch((error: unknown) => {
+        fatal.abort();
+        throw error;
       }),
     ),
   );
+  const results = settled.flatMap((entry) => (entry.status === 'fulfilled' ? [entry.value] : []));
+  const errors = settled.flatMap((entry) =>
+    entry.status === 'rejected' ? [errorMessage(entry.reason)] : [],
+  );
+  for (const error of errors) deps.logger.error(`Explorer failed: ${error}`);
   return {
     workflows: results.flatMap((r) => r.workflows),
     questions: results.flatMap((r) => r.questions),
     summaries: results.flatMap((r) => (r.summary ? [r.summary] : [])),
     stoppedBecause: results.map((r) => r.stoppedBecause),
+    errors,
   };
 }
 
@@ -161,7 +174,6 @@ async function runExplorer(
     vision,
     maxSteps: config.exploration.maxStepsPerWorkflow,
     shared: options.shared,
-    maxWorkflows: options.maxWorkflows,
   });
   await session.open();
   try {
@@ -200,7 +212,6 @@ interface ExplorerSessionOptions {
   sessionId: string;
   vision: boolean;
   maxSteps: number;
-  maxWorkflows: number;
   shared: SharedState;
 }
 
@@ -260,7 +271,7 @@ class ExplorerSession {
       defineTool({
         name: 'act',
         description:
-          'Perform one action from the adapter vocabulary and return the resulting state. Successful actions are recorded as steps of the workflow in progress.',
+          'Perform one action from the adapter vocabulary and return the resulting state. Successful actions are recorded as steps of the workflow in progress; blocked or failed ones are not.',
         schema: z.object({
           action: ActionSchema,
           note: z.string().optional().describe('Why a user would do this (kept with the step)'),
@@ -284,7 +295,11 @@ class ExplorerSession {
           if (outcome.status === 'ok') this.recorded.push({ action: validated, note });
           const signals = session.drainSignals();
           const header = [
-            `Outcome: ${outcome.status}${outcome.message ? ` (${outcome.message})` : ''}${outcome.status === 'ok' ? ` · recorded as step ${this.recorded.length}` : ' · not recorded'}`,
+            `Outcome: ${outcome.status}${outcome.message ? ` (${outcome.message})` : ''}${
+              outcome.status === 'ok'
+                ? ` · recorded as step ${this.recorded.length}`
+                : ' · not recorded'
+            }`,
             signals.length > 0
               ? `Application signals: ${signals.map((s) => `${s.kind}: ${truncate(s.message, 200)}`).join(' | ')}`
               : undefined,
@@ -312,7 +327,7 @@ class ExplorerSession {
       defineTool({
         name: 'save_workflow',
         description:
-          'Save the actions recorded since the last save or reset as a workflow, with final-state expectations you verified with check. Creates a review question for the team.',
+          'Save the actions recorded since the last save or reset as a workflow. Final-state expectations are verified against the current state; ones that do not hold are dropped. Creates a review question for the team.',
         schema: z.object({
           title: z
             .string()
@@ -322,7 +337,7 @@ class ExplorerSession {
           expect: z
             .array(AssertionSchema)
             .default([])
-            .describe('Final-state assertions that held when you checked'),
+            .describe('Final-state assertions that hold right now'),
           note: z.string().optional().describe('Doubts or observations for the human reviewer'),
         }),
         execute: async ({ title, intent, expect, note }) =>
@@ -354,19 +369,24 @@ class ExplorerSession {
         ? [
             defineTool({
               name: 'use_identity',
-              description: `Set up the session as one of the configured identities (${target.identities.map((i) => i.id).join(', ')}). Workflows saved afterwards replay with that identity.`,
+              description: `Set up the session as one of the configured identities (${target.identities
+                .map((i) => i.id)
+                .join(
+                  ', ',
+                )}). Call it right after reset, before performing any step; workflows saved afterwards replay with that identity.`,
               schema: z.object({ id: z.string() }),
               execute: async ({ id }) => {
-                const identity = target.identities.find((i) => i.id === id);
-                if (!identity) return fail(`Unknown identity "${id}"`);
-                for (const step of normalizeSteps(identity.steps)) {
-                  const outcome = await this.live().perform(step.action, {
-                    stepId: `identity:${step.id}`,
-                  });
-                  if (outcome.status !== 'ok')
-                    return fail(
-                      `Identity setup failed at ${step.action.type}: ${outcome.message ?? outcome.status}`,
-                    );
+                if (this.recorded.length > 0) {
+                  return fail(
+                    'Steps are already recorded in this journey. Call reset first, then use_identity.',
+                  );
+                }
+                if (!target.identities.some((i) => i.id === id))
+                  return fail(`Unknown identity "${id}"`);
+                try {
+                  await applyIdentity(this.live(), target, id);
+                } catch (error) {
+                  return fail(errorMessage(error));
                 }
                 this.identity = id;
                 return ok(await this.observation(`Now acting as "${id}".`));
@@ -413,21 +433,32 @@ class ExplorerSession {
   private async saveWorkflow(
     title: string,
     intent: string,
-    expect: Workflow['expect'],
+    expect: Assertion[],
     note: string | undefined,
   ) {
     const { store, target, adapter } = this.deps;
-    if (this.recorded.length === 0)
+    if (this.recorded.length === 0) {
       return fail('No steps recorded since the last save or reset. Perform the journey first.');
+    }
     if (this.options.shared.saved >= this.options.shared.budget) {
       return fail(
         'The workflow budget for this session is used up. Call finish with your summary.',
       );
     }
-    try {
-      for (const assertion of expect) adapter.validateAssertion(assertion);
-    } catch (error) {
-      return fail(`Invalid expectation: ${errorMessage(error)}`);
+    const verified: Assertion[] = [];
+    const dropped: string[] = [];
+    for (const assertion of expect) {
+      try {
+        const validated = adapter.validateAssertion(assertion);
+        const result = await this.live().check(validated);
+        if (result.passed) verified.push(validated);
+        else
+          dropped.push(
+            `${JSON.stringify(assertion)}${result.message ? ` (${result.message})` : ''}`,
+          );
+      } catch (error) {
+        dropped.push(`${JSON.stringify(assertion)} (invalid: ${errorMessage(error)})`);
+      }
     }
     const steps = normalizeSteps(this.recorded);
     const fingerprint = workflowFingerprint(target.id, this.identity, steps);
@@ -440,7 +471,7 @@ class ExplorerSession {
     }
     const workflow = createWorkflow(
       target.id,
-      { title, intent, steps, expect, identity: this.identity, tags: ['discovered'] },
+      { title, intent, steps, expect: verified, identity: this.identity, tags: ['discovered'] },
       { origin: 'discovered', status: 'pending-review' },
     );
     await store.workflows.insert(workflow);
@@ -458,8 +489,10 @@ class ExplorerSession {
       kind: 'expected-behavior',
       question: [
         `Workflow "${title}": ${intent}.`,
-        expect.length > 0
-          ? `Observed final state: ${expect.map((a) => (a.description as string | undefined) ?? JSON.stringify(a)).join('; ')}.`
+        verified.length > 0
+          ? `Observed final state: ${verified
+              .map((a) => (a.description as string | undefined) ?? JSON.stringify(a))
+              .join('; ')}.`
           : 'No final-state expectations were recorded.',
         note ? `Explorer's note: ${note}` : undefined,
         'Is this the intended behaviour? Confirm to activate the workflow, mark it as a bug, or dismiss it.',
@@ -473,8 +506,16 @@ class ExplorerSession {
     await store.questions.insert(question);
     this.questions.push(question);
     const remaining = this.options.shared.budget - this.options.shared.saved;
+    const droppedNote =
+      dropped.length > 0
+        ? ` Dropped ${dropped.length} expectation(s) that did not hold: ${dropped.join('; ')}.`
+        : '';
     return ok(
-      `Saved workflow ${workflow.id} with ${steps.length} step(s) and ${expect.length} expectation(s). ${remaining > 0 ? `${remaining} more can be saved in this session.` : 'Budget reached: call finish with your summary.'} Call reset before starting the next journey.`,
+      `Saved workflow ${workflow.id} with ${steps.length} step(s) and ${verified.length} verified expectation(s).${droppedNote} ${
+        remaining > 0
+          ? `${remaining} more can be saved in this session.`
+          : 'Budget reached: call finish with your summary.'
+      } Call reset before starting the next journey.`,
     );
   }
 

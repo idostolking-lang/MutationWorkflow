@@ -46,7 +46,7 @@ export class AppProcess {
     transcript: Transcript,
     onOutput: (stream: 'stdout' | 'stderr', chunk: string) => void,
   ): Promise<AppProcess> {
-    const child = spawn(request.command, request.args, {
+    const child = spawn(request.command, spawnArgs(request.args, request.shell), {
       cwd: request.cwd,
       env: { ...process.env, ...request.env },
       shell: request.shell,
@@ -122,6 +122,35 @@ export class AppProcess {
 /** Human-readable description of how a process ended. */
 export function describeExit(exit: ExitStatus): string {
   return exit.signal ? `was terminated by ${exit.signal}` : `exited with code ${exit.code}`;
+}
+
+/** Why per-action `args` cannot be used with these options, or undefined when they can. */
+export function actionArgsProblem(
+  shell: boolean,
+  actionArgs: ReadonlyArray<string>,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (!shell || platform !== 'win32' || actionArgs.length === 0) return undefined;
+  return 'Per-action args are not supported when the target option shell is true on Windows (cmd.exe cannot quote them safely); configure the arguments in the target options or turn shell off';
+}
+
+/**
+ * The arguments to hand to `spawn`. With `shell`, Node joins command and arguments with spaces
+ * and gives the result to the shell, so on POSIX every argument is single-quoted and reaches the
+ * program as one literal argument. On Windows arguments are passed as they are; per-action
+ * arguments are refused there (see `actionArgsProblem`).
+ */
+export function spawnArgs(
+  args: ReadonlyArray<string>,
+  shell: boolean,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  return shell && platform !== 'win32' ? args.map(shellQuote) : [...args];
+}
+
+/** Quote `arg` for a POSIX shell: wrap in single quotes, closing them around each `'`. */
+export function shellQuote(arg: string): string {
+  return `'${arg.replaceAll("'", `'\\''`)}'`;
 }
 
 function quote(arg: string): string {

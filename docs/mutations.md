@@ -96,8 +96,10 @@ invariants (for example "no orphaned records") can fail these.
 For every step whose action is an input action (`fill.value`, `select.value`; `write.text`),
 replaces the value with each fuzz value. Suffix: `fuzz step N with <label>`, where the label is
 `empty value`, `whitespace`, `<length>-char value` for values over 24 characters, or the quoted
-value. Clears the fuzzed step's expectations and the final expectations: these variants find
-crashes, server errors and broken invariants, not validation messages.
+value. Clears expectations from the fuzzed step onward (that step's, every later step's and the
+final ones), since everything after the changed data may legitimately differ; earlier steps keep
+theirs. These variants find crashes, server errors and broken invariants, not validation
+messages.
 
 `DEFAULT_FUZZ_VALUES`, used unless `mutations.fuzzValues` is set:
 
@@ -170,8 +172,11 @@ Agent variants are stored like operator variants with `mutation.operator: "agent
 validated by the adapter, and take the base's status. When a proposal omits `expect`, the
 variant gets no final expectations (`expect: []`), so only crashes, server errors and invariants
 can fail it. The agent's up to 6 proposals are not limited by the remaining cap, but they count
-against it for later operator runs.
-Without a model provider, `--agent` logs a warning and only the operators run.
+against it for later operator runs. Proposed step ids are discarded and every step gets a
+positional id (`s1`, `s2`, ...), since a model copying ids from the base would create collisions.
+
+Without a model provider, or without a model for the `mutator` role, `mutate --agent` fails
+with `PROVIDER_NOT_CONFIGURED` before doing anything; plain `mutate` needs no model.
 
 ## Reading results from mutated workflows
 

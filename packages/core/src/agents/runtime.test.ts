@@ -182,7 +182,8 @@ describe('AgentRuntime', () => {
     expect(merged).toContain('## B\nfinished sub:b');
     const subRequest = provider.requests.find(
       (r) =>
-        r.messages[0]?.content[0]?.type === 'text' && r.messages[0].content[0].text === 'sub:a',
+        r.messages[0]?.content[0]?.type === 'text' &&
+        r.messages[0].content[0].text.startsWith('sub:a'),
     );
     expect(subRequest?.tools.map((t) => t.name)).toEqual(['echo', 'delegate']);
   });

@@ -23,9 +23,15 @@ targets:
 | `args`          | `[]`         | Arguments, before any per-action `args`                                              |
 | `cwd`           | project root | Working directory, relative to the project root                                      |
 | `env`           | `{}`         | Variables merged over the current environment                                        |
-| `shell`         | `false`      | Run the command through the system shell                                             |
+| `shell`         | `false`      | Run the command through the system shell (see below)                                 |
 | `promptPattern` | none         | Multiline regular expression for the prompt shown when input is expected, e.g. `^> ` |
 | `exitTimeoutMs` | `5000`       | How long `close` waits before sending SIGTERM, then SIGKILL                          |
+
+With `shell: true` the `command` string is handed to the shell as written, so it may use shell
+syntax. Arguments are data: on POSIX every configured and per-action argument is single-quoted
+before the shell sees it, so `"; rm -rf ~"` reaches the program as one literal argument. On
+Windows, where cmd.exe has no safe quoting, configured `args` are passed as they are and `start`
+or `exec` with per-action `args` is rejected: validation refuses it and a run reports `blocked`.
 
 ## Actions
 
@@ -60,9 +66,12 @@ the prompt before it (`> 5`); anchor with `\b5$` rather than `^5$`.
 
 ## Signals
 
-- `stderr`: stderr output that looks like an error (error words such as `error`, `exception`,
-  `traceback`, `panic`, exception class names like `TypeError`, or stack frames). Each burst of
-  stderr between steps becomes one signal named by its most telling line.
+- `stderr`: stderr output that shows a defect: a stack frame (`at fn (file:line:col)`, Java
+  `at pkg.Class.method(File.java:12)`, Python `File "app.py", line 3`), an exception class name
+  such as `TypeError` or `NullPointerException`, or `Traceback`, `panic:`, `fatal`, `unhandled`,
+  `segmentation fault`, `core dumped`. Plain `error:` or `warning:` lines, which applications
+  print when they correctly reject input, do not count. Each burst of stderr between steps
+  becomes one signal named by its most telling line.
 - `process-exit`: the process exited with a non-zero code when the workflow did not end it
   (`exec`, `close` and the exit codes 130/143 after a requested SIGINT/SIGTERM are expected).
 - `crash`: the process was terminated by a signal the workflow did not send.

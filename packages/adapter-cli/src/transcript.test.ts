@@ -55,5 +55,7 @@ describe('StderrScanner', () => {
     const scanner = new StderrScanner();
     scanner.push('listening on port 3000\n', undefined);
     expect(scanner.flush()).toBeUndefined();
+    scanner.push('error: invalid number "abc"\nusage: app add <n>\n', 's1');
+    expect(scanner.flush()).toBeUndefined();
   });
 });

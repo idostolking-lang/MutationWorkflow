@@ -175,7 +175,8 @@ describe('data-fuzz', () => {
       action: { type: 'fill', selector: '#email', value: '' },
       expect: [],
     });
-    expect(first?.steps[4]?.expect).toHaveLength(1);
+    // Expectations after the fuzzed step no longer apply once the data changed.
+    expect(first?.steps[4]?.expect).toEqual([]);
     const titles = variants.map((v) => v.titleSuffix);
     expect(titles).toContain('fuzz step 2 with 2000-char value');
     expect(titles).toContain('fuzz step 4 with "line1\\nline2"');

@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { basename, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { type AgentTool, defineTool, fail, ok } from '../agents/tools.js';
 import { resolveInside } from '../util/fs.js';
@@ -31,10 +31,28 @@ const IGNORED_DIRECTORIES = new Set([
   'playwright-report',
 ]);
 
+/**
+ * Files that usually hold credentials. They are hidden from listing, reading and searching so
+ * secrets never travel to a model provider, whatever the repository's .gitignore says.
+ */
+const SECRET_FILE_PATTERNS: RegExp[] = [
+  /^\.env(\..+)?$/,
+  /\.(pem|key|p12|pfx|jks|keystore)$/i,
+  /^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/,
+  /^(credentials|secrets?)(\..+)?$/i,
+  /^\.npmrc$/,
+  /^\.netrc$/,
+  /^\.(aws|azure|gcloud)$/,
+];
+
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_SEARCH_FILE_BYTES = 1024 * 1024;
 const MAX_LIST_ENTRIES = 400;
 const MAX_SEARCH_RESULTS = 200;
+
+export function isSecretFile(name: string): boolean {
+  return SECRET_FILE_PATTERNS.some((pattern) => pattern.test(name));
+}
 
 function isIgnored(name: string, extra: ReadonlySet<string>): boolean {
   return IGNORED_DIRECTORIES.has(name) || extra.has(name);
@@ -63,13 +81,21 @@ function looksBinary(buffer: Buffer): boolean {
   return sample.length > 0 && suspicious / sample.length > 0.1;
 }
 
+interface Entry {
+  path: string;
+  relative: string;
+  isDirectory: boolean;
+  size: number;
+}
+
+/** Walk the tree without following symbolic links, so nothing outside the root is reached. */
 function* walk(
   rootDir: string,
   dir: string,
   ignored: ReadonlySet<string>,
   maxDepth: number,
   depth = 0,
-): Generator<{ path: string; relative: string; isDirectory: boolean; size: number }> {
+): Generator<Entry> {
   let entries: string[];
   try {
     entries = readdirSync(dir).sort();
@@ -78,27 +104,51 @@ function* walk(
   }
   for (const name of entries) {
     const path = join(dir, name);
-    let stats: ReturnType<typeof statSync>;
+    let stats: ReturnType<typeof lstatSync>;
     try {
-      stats = statSync(path);
+      stats = lstatSync(path);
     } catch {
       continue;
     }
+    if (stats.isSymbolicLink()) continue;
     const rel = relative(rootDir, path).split(sep).join('/');
     if (stats.isDirectory()) {
       if (isIgnored(name, ignored)) continue;
       yield { path, relative: rel, isDirectory: true, size: 0 };
       if (depth + 1 < maxDepth) yield* walk(rootDir, path, ignored, maxDepth, depth + 1);
-    } else if (stats.isFile()) {
+    } else if (stats.isFile() && !isSecretFile(name)) {
       yield { path, relative: rel, isDirectory: false, size: stats.size };
     }
   }
 }
 
+/** Resolve a user-supplied path to a real file inside the root, refusing symlink escapes. */
+function resolveFile(
+  rootDir: string,
+  path: string,
+): { ok: true; file: string } | { ok: false; reason: string } {
+  let candidate: string;
+  try {
+    candidate = resolveInside(rootDir, path);
+  } catch (error) {
+    return { ok: false, reason: (error as Error).message };
+  }
+  if (!existsSync(candidate)) return { ok: false, reason: `No such path: ${path}` };
+  const real = realpathSync(candidate);
+  const realRoot = realpathSync(rootDir);
+  if (real !== realRoot && !real.startsWith(`${realRoot}${sep}`)) {
+    return { ok: false, reason: `Path "${path}" resolves outside the project` };
+  }
+  if (isSecretFile(basename(real)))
+    return { ok: false, reason: `Path "${path}" looks like a credentials file` };
+  return { ok: true, file: real };
+}
+
 /**
  * Read-only tools the inspector uses to understand a repository: list, read and search, with
- * generated and vendored directories hidden and sizes capped so a large repository cannot flood
- * the context. Nothing here executes code or writes files.
+ * generated and vendored directories hidden, credential files excluded, symbolic links ignored
+ * and sizes capped so a large repository cannot flood the context. Nothing here executes code
+ * or writes files.
  */
 export function repositoryTools(rootDir: string): AgentTool[] {
   const ignored = gitignoredNames(rootDir);
@@ -112,16 +162,12 @@ export function repositoryTools(rootDir: string): AgentTool[] {
       depth: z.number().int().min(1).max(6).default(2),
     }),
     execute: async ({ path, depth }) => {
-      let dir: string;
-      try {
-        dir = resolveInside(rootDir, path);
-      } catch (error) {
-        return fail((error as Error).message);
-      }
-      if (!existsSync(dir) || !statSync(dir).isDirectory()) return fail(`Not a directory: ${path}`);
+      const resolved = resolveFile(rootDir, path);
+      if (!resolved.ok) return fail(resolved.reason);
+      if (!statSync(resolved.file).isDirectory()) return fail(`Not a directory: ${path}`);
       const lines: string[] = [];
       let total = 0;
-      for (const entry of walk(rootDir, dir, ignored, depth)) {
+      for (const entry of walk(rootDir, resolved.file, ignored, depth)) {
         total += 1;
         if (lines.length < MAX_LIST_ENTRIES) {
           lines.push(
@@ -143,21 +189,15 @@ export function repositoryTools(rootDir: string): AgentTool[] {
       offset: z.number().int().min(0).default(0).describe('Byte offset to start from'),
     }),
     execute: async ({ path, offset }) => {
-      let file: string;
-      try {
-        file = resolveInside(rootDir, path);
-      } catch (error) {
-        return fail((error as Error).message);
-      }
-      if (!existsSync(file) || !statSync(file).isFile()) return fail(`Not a file: ${path}`);
-      const buffer = readFileSync(file);
+      const resolved = resolveFile(rootDir, path);
+      if (!resolved.ok) return fail(resolved.reason);
+      if (!statSync(resolved.file).isFile()) return fail(`Not a file: ${path}`);
+      const buffer = readFileSync(resolved.file);
       if (looksBinary(buffer)) return fail(`${path} looks binary (${buffer.length} bytes)`);
       const slice = buffer.subarray(offset, offset + MAX_FILE_BYTES).toString('utf8');
-      const remaining = Math.max(0, buffer.length - offset - MAX_FILE_BYTES);
+      const rest = Math.max(0, buffer.length - offset - MAX_FILE_BYTES);
       return ok(
-        remaining > 0
-          ? `${slice}\n… ${remaining} more bytes (offset ${offset + MAX_FILE_BYTES})`
-          : slice,
+        rest > 0 ? `${slice}\n… ${rest} more bytes (offset ${offset + MAX_FILE_BYTES})` : slice,
       );
     },
   });

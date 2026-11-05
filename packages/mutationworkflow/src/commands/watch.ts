@@ -26,7 +26,11 @@ export function registerWatch(program: Command, cli: Cli): void {
                 signal: job.signal,
                 jobId: job.job.id,
                 onEvent: cli.onAgentEvent,
-                onCycle: (cycle, summary) => {
+                onCycle: (cycle, summary, error) => {
+                  if (!summary) {
+                    cli.output.out(`cycle ${cycle} failed: ${error ?? 'unknown error'}`);
+                    return;
+                  }
                   const s = summary.stats;
                   cli.output.out(
                     `cycle ${cycle}: ${s.total} runs (${s.passed} passed, ${s.failed} failed, ${s.blocked} blocked, ${s.error} error), ${summary.findings.length} finding(s) touched, ${formatDuration(summary.durationMs)}`,

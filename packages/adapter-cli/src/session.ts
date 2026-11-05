@@ -17,7 +17,7 @@ import { type CliAction, CliActionSchemas } from './actions.js';
 import { type CliAssertion, CliAssertionSchemas } from './assertions.js';
 import { compilePattern, endsWithPrompt } from './matching.js';
 import type { ResolvedCliOptions } from './options.js';
-import { AppProcess, describeExit } from './process.js';
+import { AppProcess, actionArgsProblem, describeExit } from './process.js';
 import { createSignal, StderrScanner } from './signals.js';
 import { type OutputOffsets, START_OFFSETS, Transcript } from './transcript.js';
 import { parseByType } from './vocabulary.js';
@@ -99,12 +99,16 @@ export class CliSession implements AdapterSession {
 
   private async start(args: string[] = []): Promise<Result> {
     if (this.running) return { status: 'blocked', message: 'The process is already running' };
+    const problem = actionArgsProblem(this.options.shell, args);
+    if (problem) return { status: 'blocked', message: problem };
     const proc = await this.spawn(args);
     return { status: 'ok', message: `Started ${proc.commandLine}` };
   }
 
   private async exec(args: string[] = []): Promise<Result> {
     if (this.running) return { status: 'blocked', message: 'A process is already running' };
+    const problem = actionArgsProblem(this.options.shell, args);
+    if (problem) return { status: 'blocked', message: problem };
     const proc = await this.spawn(args, true);
     proc.endInput();
     const timeoutMs = this.session.stepTimeoutMs;

@@ -33,7 +33,7 @@ Automatic oracles flagged the findings below. Each comes with the workflow that 
 - not-a-bug: the application handled the unusual sequence correctly (refused, showed validation, stayed consistent) and the expectation failed only because the mutation made it inapplicable.
 - needs-human: the right behaviour depends on product intent you cannot infer.
 
-For every finding write a precise title and a summary an engineer can reproduce from, choose the severity by user impact, and mark duplicates (same root cause) with duplicateOf pointing at the finding that best represents them.
+For every finding write a precise title and a summary an engineer can reproduce from, choose the severity by user impact, and mark duplicates (same root cause) with duplicateOf set to the id of another finding in this batch that best represents them; never invent ids. A needs-human verdict creates a question for the team, so make the title and summary self-explanatory. Workflows marked pending review carry agent-written expectations nobody confirmed, so a failed expectation there is weaker evidence than one from a translated test.
 
 ${describeTarget(input.target)}
 

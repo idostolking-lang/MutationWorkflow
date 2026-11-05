@@ -96,10 +96,12 @@ async function dispatch(action: WebAction, context: PerformContext): Promise<str
         await guardDenyText(locate(action.target), action.target, context);
         await locate(action.target).press(action.key, timeout);
       } else {
+        await guardFocusedDenyText(context);
         await page.keyboard.press(action.key);
       }
       return undefined;
     case 'select':
+      await guardSelectDenyText(locate(action.target), action.target, action.value, context);
       await locate(action.target).selectOption(action.value, timeout);
       return undefined;
     case 'check':
@@ -107,6 +109,7 @@ async function dispatch(action: WebAction, context: PerformContext): Promise<str
       await locate(action.target).check(timeout);
       return undefined;
     case 'uncheck':
+      await guardDenyText(locate(action.target), action.target, context);
       await locate(action.target).uncheck(timeout);
       return undefined;
     case 'hover':
@@ -154,6 +157,92 @@ async function guardDenyText(
     await locator.getAttribute('aria-label', timeout),
     await locator.getAttribute('value', timeout),
   ].join(' ');
+  const pattern = matchingDenyText(text, context.denyText);
+  if (pattern) {
+    throw new Blocked(`${describeLocator(target)} matches scope.denyText ${pattern.source}`);
+  }
+}
+
+/**
+ * Refuse to press a key while the focused element (followed into shadow roots and same-origin
+ * iframes) has text, aria-label or value matching `scope.denyText`: Enter or Space would
+ * activate it. Nothing focused (the body) is never refused.
+ */
+async function guardFocusedDenyText(context: PerformContext): Promise<void> {
+  if (context.denyText.length === 0) return;
+  const focused = await context.page.evaluate(() => {
+    interface FocusElement {
+      tagName: string;
+      textContent: string | null;
+      getAttribute(name: string): string | null;
+      shadowRoot?: { activeElement: FocusElement | null } | null;
+      contentDocument?: FocusDocument | null;
+    }
+    interface FocusDocument {
+      activeElement: FocusElement | null;
+      body: unknown;
+      documentElement: unknown;
+    }
+    const top = (globalThis as unknown as { document: FocusDocument }).document;
+    let doc = top;
+    let element = doc.activeElement;
+    for (let depth = 0; element && depth < 20; depth++) {
+      const inner = element.shadowRoot?.activeElement ?? element.contentDocument?.activeElement;
+      if (!inner) break;
+      if (element.contentDocument) doc = element.contentDocument;
+      element = inner;
+    }
+    if (!element || element === doc.body || element === doc.documentElement) return undefined;
+    return {
+      tag: element.tagName.toLowerCase(),
+      text: [
+        element.textContent ?? '',
+        element.getAttribute('aria-label') ?? '',
+        element.getAttribute('value') ?? '',
+      ].join(' '),
+    };
+  });
+  if (!focused) return;
+  const pattern = matchingDenyText(focused.text, context.denyText);
+  if (pattern) {
+    throw new Blocked(
+      `The focused <${focused.tag}> "${firstLine(focused.text.trim())}" matches scope.denyText ${pattern.source}`,
+    );
+  }
+}
+
+/**
+ * Refuse to choose an option whose label or value matches `scope.denyText`, or any option of a
+ * select whose own aria-label matches. The other options' text is not considered.
+ */
+async function guardSelectDenyText(
+  locator: PlaywrightLocator,
+  target: Locator,
+  value: string,
+  context: PerformContext,
+): Promise<void> {
+  if (context.denyText.length === 0) return;
+  const timeout = { timeout: context.timeoutMs };
+  const optionText = await locator.evaluate(
+    (element, wanted) => {
+      interface OptionLike {
+        value: string;
+        label: string;
+        textContent: string | null;
+      }
+      const options = (element as unknown as { options?: ArrayLike<OptionLike> }).options;
+      const match = Array.from(options ?? []).find(
+        (option) =>
+          option.value === wanted ||
+          option.label === wanted ||
+          (option.textContent ?? '').trim() === wanted,
+      );
+      return match ? `${match.label} ${match.value}` : '';
+    },
+    value,
+    timeout,
+  );
+  const text = [value, optionText, await locator.getAttribute('aria-label', timeout)].join(' ');
   const pattern = matchingDenyText(text, context.denyText);
   if (pattern) {
     throw new Blocked(`${describeLocator(target)} matches scope.denyText ${pattern.source}`);

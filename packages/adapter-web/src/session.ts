@@ -13,13 +13,13 @@ import {
   tail,
   truncate,
 } from '@mutationworkflow/core';
-import type { BrowserContext, Page } from 'playwright';
+import type { BrowserContext, Page, Request, Route } from 'playwright';
 import { z } from 'zod';
 import { WebActionSchema } from './actions.js';
 import { evaluateAssertion, WebAssertionSchema } from './assertions.js';
 import { PageMonitor } from './monitor.js';
 import { type PerformResult, runAction } from './perform.js';
-import { compileDenyText, outOfScopeReason } from './scope.js';
+import { compileDenyText, outOfScopeReason, requestBlockReason } from './scope.js';
 import { firstLine } from './util.js';
 
 const SUMMARY_MAX_CHARS = 6000;
@@ -27,13 +27,24 @@ const CONSOLE_EVIDENCE_LINES = 50;
 const CONSOLE_EVIDENCE_MAX_CHARS = 8000;
 const SETTLE_MAX_MS = 3000;
 
-/** One isolated browser context and page, driven step by step. */
+/**
+ * One isolated browser context and page, driven step by step. Workflows run in a single tab:
+ * pages the application opens (target=_blank, window.open) are closed at once.
+ *
+ * Scope is enforced before requests leave the browser: a route on the context aborts every
+ * navigation, and every request with a method other than GET or HEAD, whose URL is out of scope.
+ * Checking the page URL after each action remains as a backstop (for example for redirects).
+ */
 export class WebSession implements AdapterSession {
   private readonly monitor: PageMonitor;
   private readonly denyText: RegExp[];
+  /** Main-frame navigations the route aborted since the last action began, as reasons. */
+  private blockedNavigations: string[] = [];
+  /** Notes for the next outcome message, such as closed popups. */
+  private notes: string[] = [];
   private closed = false;
 
-  constructor(
+  private constructor(
     private readonly context: BrowserContext,
     private readonly page: Page,
     private readonly baseUrl: string,
@@ -42,6 +53,32 @@ export class WebSession implements AdapterSession {
     this.denyText = compileDenyText(options.scope.denyText);
     this.monitor = new PageMonitor(page);
     context.setDefaultTimeout(options.stepTimeoutMs);
+    context.on('page', (opened) => {
+      if (opened !== this.page) void this.closePopup(opened);
+    });
+  }
+
+  /**
+   * Start a session on a fresh context and its page; installs the scope route before anything
+   * is loaded. The context should block service workers, whose requests bypass routes.
+   */
+  static async start(
+    context: BrowserContext,
+    page: Page,
+    baseUrl: string,
+    options: SessionOptions,
+  ): Promise<WebSession> {
+    const session = new WebSession(context, page, baseUrl, options);
+    await context.route('**/*', (route) => session.onRoute(route));
+    return session;
+  }
+
+  /**
+   * The Playwright page, for tests and extensions. Whatever is done with it directly still goes
+   * through the scope route, but not through the denyText guard.
+   */
+  get playwrightPage(): Page {
+    return this.page;
   }
 
   async perform(action: Action, step: StepContext = {}): Promise<ActionOutcome> {
@@ -58,6 +95,10 @@ export class WebSession implements AdapterSession {
 
     const webAction = parsed.data;
     this.monitor.stepId = step.stepId;
+    // Navigations blocked between steps were not caused by this action.
+    for (const reason of this.takeBlockedNavigations()) {
+      this.addNote(`navigation blocked before this step (${reason})`);
+    }
     const label = step.index === undefined ? webAction.type : `${step.index}-${webAction.type}`;
     const meta = { stepId: step.stepId, label };
 
@@ -169,23 +210,131 @@ export class WebSession implements AdapterSession {
     });
   }
 
-  /** Let the page settle, then undo any navigation that left the scope. */
+  /**
+   * Let the page settle, report navigations the scope route aborted, undo any navigation that
+   * still left the scope, and attach pending notes.
+   */
   private async afterAction(result: PerformResult): Promise<PerformResult> {
     if (this.monitor.hasCrashed) return { status: 'error', message: 'The page crashed' };
     await this.monitor.settle(Math.min(this.options.stepTimeoutMs, SETTLE_MAX_MS));
+    const blocked = this.takeBlockedNavigations();
+    if (blocked.length > 0) {
+      result = {
+        status: 'blocked',
+        message: `The action tried to navigate out of scope (${blocked.join('; ')}); the navigation was aborted`,
+      };
+    }
     const url = this.page.url();
     const reason = outOfScopeReason(url, this.options.scope, this.baseUrl);
-    if (!reason) return result;
-    await this.page.goBack({ timeout: this.options.stepTimeoutMs }).catch((error: unknown) =>
-      this.options.logger.warn('Could not leave an out-of-scope page', {
-        url,
+    if (reason) {
+      await this.page.goBack({ timeout: this.options.stepTimeoutMs }).catch((error: unknown) =>
+        this.options.logger.warn('Could not leave an out-of-scope page', {
+          url,
+          error: errorMessage(error),
+        }),
+      );
+      result = {
+        status: 'blocked',
+        message:
+          blocked.length > 0
+            ? `${result.message}; went back`
+            : `The action navigated out of scope (${reason}); went back`,
+      };
+    }
+    return this.withNotes(result);
+  }
+
+  /** Decide one request before it leaves the browser: continue it or abort it. */
+  private async onRoute(route: Route): Promise<void> {
+    const request = route.request();
+    try {
+      const isNavigation = request.isNavigationRequest();
+      const inMainPage = this.isFromMainPage(request);
+      if (isNavigation && !inMainPage) {
+        // A popup or new tab: it never loads anything; the page itself is closed.
+        this.monitor.markBlocked(request, 'popups are not followed');
+        this.addNote(`popup to ${request.url()} closed`);
+        await route.abort('aborted');
+        return;
+      }
+      const reason = requestBlockReason(
+        { url: request.url(), method: request.method(), isNavigation },
+        this.options.scope,
+        this.baseUrl,
+      );
+      if (reason === undefined) {
+        await route.continue();
+        return;
+      }
+      this.monitor.markBlocked(request, reason);
+      this.options.logger.debug('Request blocked by scope', {
+        method: request.method(),
+        url: request.url(),
+        reason,
+      });
+      if (isNavigation) {
+        if (this.isMainFrame(request)) this.blockedNavigations.push(reason);
+        else this.addNote(`frame navigation blocked (${reason})`);
+      }
+      // An aborted navigation leaves the current document in place; other error codes would
+      // replace it with the browser's error page.
+      await route.abort(isNavigation ? 'aborted' : 'blockedbyclient');
+    } catch (error) {
+      // The page or context closed while deciding; nothing is left to load.
+      this.options.logger.debug('Routing a request failed', {
+        url: request.url(),
         error: errorMessage(error),
-      }),
-    );
-    return {
-      status: 'blocked',
-      message: `The action navigated out of scope (${reason}); went back`,
-    };
+      });
+    }
+  }
+
+  /**
+   * True when the request belongs to the session's page. A popup's first navigation is issued
+   * before its frame exists, which Playwright reports by throwing.
+   */
+  private isFromMainPage(request: Request): boolean {
+    try {
+      return request.frame().page() === this.page;
+    } catch {
+      return !request.isNavigationRequest();
+    }
+  }
+
+  private isMainFrame(request: Request): boolean {
+    try {
+      return request.frame() === this.page.mainFrame();
+    } catch {
+      return false;
+    }
+  }
+
+  /** Close a page the application opened; the workflow continues in the original page. */
+  private async closePopup(popup: Page): Promise<void> {
+    const url = popup.url();
+    if (/^https?:/i.test(url)) this.addNote(`popup to ${url} closed`);
+    this.options.logger.debug('Closing a popup', { url });
+    await popup
+      .close()
+      .catch((error: unknown) =>
+        this.options.logger.debug('Closing a popup failed', { error: errorMessage(error) }),
+      );
+  }
+
+  private takeBlockedNavigations(): string[] {
+    const blocked = this.blockedNavigations;
+    this.blockedNavigations = [];
+    return blocked;
+  }
+
+  private addNote(note: string): void {
+    if (!this.notes.includes(note)) this.notes.push(note);
+  }
+
+  private withNotes(result: PerformResult): PerformResult {
+    if (this.notes.length === 0) return result;
+    const notes = this.notes.join('; ');
+    this.notes = [];
+    return { ...result, message: result.message ? `${result.message}; ${notes}` : notes };
   }
 
   private unusableReason(): string | undefined {

@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { createServer as createHttpServer, type Server } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -8,10 +9,11 @@ import {
   type AdapterSession,
   createLogger,
   EvidenceSink,
+  MutationWorkflowError,
   type Signal,
 } from '@mutationworkflow/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createAdapter } from '../src/index.js';
+import { createAdapter, WebSession } from '../src/index.js';
 
 const SERVER = resolve(import.meta.dirname, '../../../examples/todo-web/server.js');
 
@@ -21,6 +23,16 @@ let adapter: Adapter;
 let session: AdapterSession;
 let evidenceRoot: string;
 const signals: Signal[] = [];
+/** A second local app on another port: out of scope, counts the requests that reach it. */
+let otherServer: Server;
+let otherUrl: string;
+const otherHits: string[] = [];
+
+/** The Playwright page behind a session, to act as the application itself would. */
+function pageOf(of: AdapterSession) {
+  if (!(of instanceof WebSession)) throw new Error('Expected a WebSession');
+  return of.playwrightPage;
+}
 
 /** Collect the signals emitted since the last call, keeping a log of all of them. */
 function drain(): Signal[] {
@@ -37,6 +49,13 @@ beforeAll(async () => {
     stdio: 'ignore',
   });
   await waitForHealth(`${baseUrl}/api/health`);
+  otherServer = createHttpServer((request, response) => {
+    otherHits.push(`${request.method} ${request.url}`);
+    response.end('other');
+  });
+  await new Promise<void>((resolveListen) => otherServer.listen(0, '127.0.0.1', resolveListen));
+  const otherAddress = otherServer.address();
+  otherUrl = `http://127.0.0.1:${typeof otherAddress === 'object' && otherAddress ? otherAddress.port : 0}`;
 
   evidenceRoot = mkdtempSync(join(tmpdir(), 'mw-web-e2e-'));
   adapter = createAdapter({
@@ -66,6 +85,7 @@ afterAll(async () => {
   await session?.close();
   await adapter?.dispose();
   server?.kill();
+  otherServer?.close();
   if (evidenceRoot) rmSync(evidenceRoot, { recursive: true, force: true });
 });
 
@@ -148,6 +168,66 @@ describe('web adapter against examples/todo-web', () => {
     expect(await session.check({ type: 'url-matches', pattern: '/' })).toMatchObject({
       passed: true,
     });
+    expect(pageOf(session).url()).toBe(`${baseUrl}/`);
+  });
+
+  it('aborts an out-of-scope navigation an action causes before it leaves the browser', async () => {
+    const target = `${otherUrl}/elsewhere`;
+    await pageOf(session).evaluate(`(() => {
+      const link = document.createElement('a');
+      link.href = ${JSON.stringify(target)};
+      link.textContent = 'Leave the app';
+      document.body.append(link);
+    })()`);
+    const outcome = await session.perform({
+      type: 'click',
+      target: { role: 'link', name: 'Leave the app' },
+    });
+    expect(outcome.status).toBe('blocked');
+    expect(outcome.message).toContain(target);
+    expect(outcome.message).toMatch(/navigation was aborted/);
+    expect(pageOf(session).url()).toBe(`${baseUrl}/`);
+    expect(otherHits).toEqual([]);
+    expect(drain().filter((s) => s.kind === 'network-error')).toEqual([]);
+  });
+
+  it('aborts out-of-scope requests with side effects but lets GETs load', async () => {
+    const page = pageOf(session);
+    const post = await page.evaluate(async (url) => {
+      try {
+        await fetch(url, { method: 'POST', mode: 'no-cors', body: 'charge' });
+        return 'sent';
+      } catch (error) {
+        return `failed: ${String(error)}`;
+      }
+    }, `${otherUrl}/charge`);
+    expect(post).toMatch(/^failed/);
+    expect(otherHits).toEqual([]);
+
+    const get = await page.evaluate(async (url) => {
+      try {
+        await fetch(url, { mode: 'no-cors' });
+        return 'sent';
+      } catch (error) {
+        return `failed: ${String(error)}`;
+      }
+    }, `${otherUrl}/font.woff2`);
+    expect(get).toBe('sent');
+    expect(otherHits).toEqual(['GET /font.woff2']);
+    otherHits.length = 0;
+    drain();
+  });
+
+  it('closes popups and keeps working in the original tab', async () => {
+    const page = pageOf(session);
+    await page.evaluate(`window.open(${JSON.stringify(`${baseUrl}/popup`)}, '_blank')`);
+    const outcome = await session.perform({ type: 'wait', ms: 300 });
+    expect(outcome.status).toBe('ok');
+    expect(outcome.message).toContain(`popup to ${baseUrl}/popup closed`);
+    expect(page.context().pages()).toEqual([page]);
+    expect(page.url()).toBe(`${baseUrl}/`);
+    const next = await session.perform({ type: 'wait', ms: 1 });
+    expect(next.message).toBeUndefined();
   });
 
   it('blocks a missing element and saves a screenshot', async () => {
@@ -176,6 +256,66 @@ describe('web adapter against examples/todo-web', () => {
     expect(await session.check({ type: 'text-visible', text: 'Everything' })).toMatchObject({
       passed: true,
     });
+  });
+
+  it('blocks press while a denyText control is focused', async () => {
+    const guarded = await adapter.open({
+      sessionId: 'ses_e2e_press',
+      evidence: new EvidenceSink({ rootDir: evidenceRoot, sessionDir: 'sessions/e2e-press' }),
+      screenshots: 'never',
+      stepTimeoutMs: 2_000,
+      scope: { allowUrls: [], denyUrls: [], denyText: ['^\\s*delete\\b'] },
+      logger: createLogger({ level: 'silent' }),
+    });
+    try {
+      expect((await guarded.perform({ type: 'navigate', url: '/' })).status).toBe('ok');
+      const fill = { type: 'fill', target: { label: 'New todo' }, value: 'Keep me' };
+      expect((await guarded.perform(fill)).status).toBe('ok');
+      expect((await guarded.perform({ type: 'click', target: addButton })).status).toBe('ok');
+      const remove = { role: 'button', name: 'Delete Keep me', nth: 0 };
+      // The guard on a target still applies.
+      const targeted = await guarded.perform({ type: 'press', key: 'Enter', target: remove });
+      expect(targeted.status).toBe('blocked');
+
+      await pageOf(guarded).getByRole('button', { name: 'Delete Keep me' }).first().focus();
+      const outcome = await guarded.perform({ type: 'press', key: 'Enter' });
+      expect(outcome.status).toBe('blocked');
+      expect(outcome.message).toMatch(/focused <button>.*denyText/);
+      expect(
+        await guarded.check({ type: 'text-visible', text: 'Keep me', exact: true }),
+      ).toMatchObject({ passed: true });
+
+      // Nothing focused: the press is not refused because of text elsewhere on the page.
+      await pageOf(guarded).evaluate('document.activeElement && document.activeElement.blur()');
+      expect((await guarded.perform({ type: 'press', key: 'Escape' })).status).toBe('ok');
+    } finally {
+      await guarded.close();
+    }
+  });
+
+  it('rejects a non-loopback baseUrl unless allowRemoteBaseUrl is set', () => {
+    const target = {
+      id: 'remote',
+      kind: 'web',
+      options: { baseUrl: 'https://example.com' } as Record<string, unknown>,
+      environment: {},
+      identities: [],
+      invariants: [],
+      scope: { allowUrls: [], denyUrls: [], denyText: [] },
+    };
+    const logger = createLogger({ level: 'silent' });
+    let thrown: unknown;
+    try {
+      createAdapter({ target, rootDir: evidenceRoot, logger });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(MutationWorkflowError);
+    expect((thrown as MutationWorkflowError).code).toBe('CONFIG_INVALID');
+    expect((thrown as Error).message).toMatch(/allowRemoteBaseUrl/);
+
+    target.options = { baseUrl: 'https://example.com', allowRemoteBaseUrl: true };
+    expect(createAdapter({ target, rootDir: evidenceRoot, logger }).kind).toBe('web');
   });
 
   it('fails assertions without throwing', async () => {

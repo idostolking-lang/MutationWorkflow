@@ -100,9 +100,16 @@ export function workflowFingerprint(
   return fingerprint({ targetId, identity: identity ?? null, actions: steps.map((s) => s.action) });
 }
 
-/** Assign ids to steps that lack one, keeping existing ids stable. */
+/**
+ * Assign ids to steps that lack one. Existing ids are kept when they are unique; when a model
+ * copied a step and its id, every step gets a positional id instead, so ids stay unambiguous.
+ */
 export function normalizeSteps(steps: ReadonlyArray<StepInput>): Step[] {
-  return steps.map((step, index) => StepSchema.parse({ ...step, id: step.id ?? `s${index + 1}` }));
+  const ids = steps.flatMap((step) => (step.id ? [step.id] : []));
+  const unique = new Set(ids).size === ids.length;
+  return steps.map((step, index) =>
+    StepSchema.parse({ ...step, id: unique && step.id ? step.id : `s${index + 1}` }),
+  );
 }
 
 export interface CreateWorkflowOptions {

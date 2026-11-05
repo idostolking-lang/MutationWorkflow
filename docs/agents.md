@@ -15,16 +15,33 @@ Related: [README](../README.md) · [Configuration](configuration.md#agents) ·
 
 | Role        | Used by          | Sees                                                                                                                                  | Tools                                                                                                         | Produces                                                                                                           |
 | ----------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `inspector` | setup            | The repository (read-only), the vocabularies of the registered adapters                                                               | `list_files`, `read_file`, `search`                                                                           | An inspection report: summary, stack, proposed targets, features, existing tests, seed workflows, risks, questions |
+| `inspector` | setup            | The repository (read-only, credential files hidden), the vocabularies of the registered adapters                                      | `list_files`, `read_file`, `search`                                                                           | An inspection report: summary, stack, proposed targets, features, existing tests, seed workflows, risks, questions |
 | `explorer`  | explore          | The target description, identities, invariants and scope; the adapter vocabulary and guide; titles of known workflows; its assignment | `observe`, `act`, `check`, `save_workflow`, `reset`, `list_workflows`, `use_identity` (when identities exist) | `discovered` workflows (`pending-review`) with questions, and a summary of what looked suspicious                  |
 | `mutator`   | `mutate --agent` | One base workflow, the target, the vocabulary, existing variant descriptions                                                          | none besides `finish`                                                                                         | Up to 6 variants per base ([Mutations](mutations.md#agent-proposed-mutations))                                     |
 | `triager`   | run, triage      | Dossiers of up to 8 pending findings: steps with outcomes, mutation, failed expectations, signals, evidence ids                       | `get_evidence`, `get_run`, `get_workflow`                                                                     | A verdict, title, summary, severity, rationale and optional duplicate per finding ([Oracles](oracles.md#triage))   |
 
 Every agent also gets `finish` (when a structured result is expected). The inspector and the
 triager also get `delegate` below the depth limit; explorers and the mutator run without it,
-because an explorer's tools are bound to its one live adapter session. All prompts include the same safety rules: only interact with the local test
-instance, never trigger real-world side effects even if the UI offers them, stay in scope and
-treat a refusal as information.
+because an explorer's tools are bound to its one live adapter session. All prompts include the
+same safety rules: only interact with the local test instance, never trigger real-world side
+effects even if the UI offers them, stay in scope and treat a refusal as information.
+
+### What agents do not see
+
+- **Target secrets.** The target description in prompts shows only the options `baseUrl`,
+  `command`, `args`, `cwd`, `promptPattern`, `browser`, `headless` and `viewport`, plus identity
+  ids and descriptions. Identity steps (logins) and the `env`, `launchOptions` and
+  `storageStatePath` options are never sent to a model; the copy stored in the database is
+  redacted the same way.
+- **Credential files.** The inspector's `list_files`, `read_file` and `search` hide `.env*`,
+  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `id_rsa*` (and other `id_*` keys),
+  `credentials*`, `secrets*`, `.npmrc`, `.netrc` and `.aws`/`.azure`/`.gcloud` files, whatever the
+  repository's `.gitignore` says. They never follow symbolic links and refuse any path that
+  resolves outside the project. Generated and vendored directories (`node_modules` and the like)
+  are skipped, and file and listing sizes are capped.
+- **Old screenshots.** Only the two most recent images stay in an agent's conversation; older
+  ones are replaced by the placeholder `[earlier screenshot omitted to save context]`, which keeps
+  long explorations within provider image limits and cost.
 
 ### Exploration in detail
 
@@ -34,11 +51,23 @@ cases (empty input, cancel, undo, validation); navigation and recovery (back, re
 views); secondary features. With `focus`, the items are distributed across explorers.
 
 An explorer acts one step at a time with `act`; every action with outcome `ok` is recorded as a
-step. `save_workflow` turns the recorded steps into a workflow with the final expectations the
-explorer verified with `check`, refuses an exact duplicate (same fingerprint), stores a final
-screenshot and opens an `expected-behavior` question. `reset` starts a fresh session between
-journeys. The session budget (`maxWorkflows`) is shared by all explorers; each journey is capped
+step (blocked and failed ones are not). `save_workflow` turns the recorded steps into a workflow:
+it checks each proposed final expectation against the live state and keeps only those that hold
+(the agent is told which were dropped), refuses an exact duplicate (same fingerprint), stores a
+final screenshot and opens an `expected-behavior` question. `reset` starts a fresh session between
+journeys; `use_identity` must be called right after a reset, before any step is recorded. If one
+explorer fails fatally (its session cannot open, the runtime breaks), the others are aborted,
+since the environment is probably gone; the failures are listed in the result's `errors`. The session budget (`maxWorkflows`) is shared by all explorers; each journey is capped
 at `maxStepsPerWorkflow` steps. Evidence goes to `<evidenceDir>/explore/<sessionId>/`.
+
+### Setup in detail
+
+The inspector studies the repository and proposes targets, seed workflows and questions. Its
+start and reset commands are model-written, so setup does not run them by default: pass
+`--validate` (`mw setup --validate`, or `validate: true` to `mw_setup` over MCP) to start each
+proposed environment once. Validation only happens for a config setup just created, never for a
+proposal written next to an existing config, and each start command is logged before it runs. A
+failing start command becomes a `setup` question.
 
 ## Choosing models
 
@@ -89,8 +118,9 @@ providers:
 ```
 
 A provider whose key variable is unset is skipped with a warning. With no provider at all,
-agent commands (setup, explore, triage) fail with `PROVIDER_NOT_CONFIGURED`; `mutate --agent`
-falls back to operators only; runs mark new findings' triage as `skipped`.
+agent commands (setup, explore, triage, `mutate --agent`) fail early with
+`PROVIDER_NOT_CONFIGURED`, as they do when the role they need has no model; runs mark new
+findings' triage as `skipped` (also when only the triager role lacks a model).
 
 The Anthropic provider streams requests and enables automatic prompt caching for the whole
 prompt prefix, which makes long tool loops cheap. The OpenAI provider uses Chat Completions with
@@ -103,8 +133,9 @@ effort. Lower effort suits the triager and mutator; exploration and inspection b
 
 With `vision` on, explorers receive a screenshot with every observation and the triager can view
 screenshot evidence; with it off, explorers work from the text observation (the ARIA snapshot or
-the terminal transcript) and the triager is told where a screenshot is stored instead. Exploration takes observation
-screenshots unless `execution.screenshots` is `never`.
+the terminal transcript) and the triager is told where a screenshot is stored instead.
+Exploration takes observation screenshots unless `execution.screenshots` is `never`. Only the two
+most recent screenshots stay in context (see above).
 
 ## Parallelism and delegation
 
@@ -116,7 +147,8 @@ parent waiting on its delegates never blocks them.
 
 `delegate` lets the inspector or triager split independent work: it takes 1 to `max(2, 2 × maxParallel)` tasks,
 each `{ title, task }`, runs a sub-agent per task in parallel with the same role, system prompt
-and tools, and returns each sub-agent's final text. Sub-agents do not see the parent's
+and tools, and returns each sub-agent's final text. Sub-agents have no `finish` tool and are
+told to report their results as plain text in their final message. They do not see the parent's
 conversation, so tasks must be self-contained. Depth is limited: top-level agents (depth 0) and
 their delegates (depth 1) can delegate; depth-2 sub-agents cannot. The inspector is told to use
 it for large repositories (tests, routing, infrastructure in parallel).
