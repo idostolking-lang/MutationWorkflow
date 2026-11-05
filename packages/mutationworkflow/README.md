@@ -48,11 +48,28 @@ Full reference: [docs/cli.md](../../docs/cli.md).
 ## MCP
 
 ```sh
-claude mcp add mutationworkflow -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY -- npx -y mutationworkflow mcp
+claude mcp add mutationworkflow -- npx -y mutationworkflow mcp
 ```
 
+The connected coding agent can run every agent role itself, with its own model and no API key:
+it asks the server for a brief, does the thinking, and calls fine-grained tools. The `setup`,
+`explore`, `triage` and `mutate` prompts (slash commands in Claude Code) walk it through. Give the
+server a provider instead (`-e ANTHROPIC_API_KEY=...` plus `agents.defaults.model`, or a
+`claude-code` / `codex` provider) to run the roles inside the server as background jobs.
+
+| Tools                                                                                                            | For                                     |
+| ---------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `mw_status`, `mw_findings`, `mw_finding`, `mw_update_finding`, `mw_workflows`, `mw_workflow`, `mw_run_detail`, `mw_evidence`      | Reading and bookkeeping                 |
+| `mw_questions`, `mw_answer`, `mw_search`, `mw_report`, `mw_jobs`, `mw_job`, `mw_cancel_job`                     | Questions, search, reports, jobs        |
+| `mw_mutate`, `mw_run`                                                                                            | Deterministic mutation and replay (job) |
+| `mw_setup`, `mw_explore`, `mw_triage`, `mw_mutate {agent}`                                                       | Roles run by the server's provider (job) |
+| `mw_inspect_brief`, `mw_inspect_apply`                                                                           | Setup by the client                     |
+| `mw_explore_open`, `mw_observe`, `mw_act`, `mw_check`, `mw_save_workflow`, `mw_reset_session`, `mw_use_identity`, `mw_list_known_workflows`, `mw_explore_close` | Exploration by the client |
+| `mw_triage_brief`, `mw_triage_apply`                                                                             | Triage by the client                    |
+| `mw_mutation_brief`, `mw_mutation_apply`                                                                         | Agent mutation by the client            |
+
 Long operations return a job id to poll with `mw_job`. Setup for Codex and Cursor, the tool
-reference and typical flows: [docs/mcp.md](../../docs/mcp.md).
+reference, the session model and example flows: [docs/mcp.md](../../docs/mcp.md).
 
 ## Programmatic use
 

@@ -10,6 +10,7 @@ import {
   MutationWorkflowError,
   QuestionDecisionSchema,
   SeveritySchema,
+  type StatusSummary,
   truncate,
   WorkflowOriginSchema,
   WorkflowStatusSchema,
@@ -22,6 +23,7 @@ import {
   formatJobDetail,
   formatJobs,
   formatQuestions,
+  formatRunDetail,
   formatSearch,
   formatStatus,
   formatWorkflowDetail,
@@ -40,6 +42,14 @@ const MAX_EVIDENCE_CHARS = 100_000;
 /** Reports beyond this size are cut in tool output; the file on disk is complete. */
 const MAX_REPORT_CHARS = 30_000;
 
+/** Remind the client that it can always run the agent roles itself. */
+function agentNotes(status: StatusSummary): string {
+  const { agents } = status;
+  return agents.enabled && agents.problems.length === 0
+    ? 'You can also run any role yourself: mw_inspect_brief, mw_explore_open, mw_triage_brief, mw_mutation_brief.'
+    : 'Run the roles yourself, with your own model and no API key: mw_inspect_brief, mw_explore_open, mw_triage_brief, mw_mutation_brief (or the setup, explore, triage and mutate prompts).';
+}
+
 /** Register every read and bookkeeping tool. */
 export function registerMemoryTools(server: McpServer, engine: Engine): void {
   server.registerTool(
@@ -47,13 +57,29 @@ export function registerMemoryTools(server: McpServer, engine: Engine): void {
     {
       title: 'Project status',
       description:
-        'Overview: targets, workflows (base, mutations, pending review), runs, open findings by severity, open questions, agent configuration and model usage. Call this first.',
+        'Overview: targets, workflows (base, mutations, pending review), runs, open findings by severity, open questions, agent configuration (model per role, roles that cannot run and why) and model usage. Call this first.',
       inputSchema: {},
       annotations: READ,
     },
     safe(async () => {
       const status = await engine.status();
-      return textResult(formatStatus(status), status);
+      return textResult(`${formatStatus(status)}\n${agentNotes(status)}`, status);
+    }),
+  );
+
+  server.registerTool(
+    'mw_run_detail',
+    {
+      title: 'Get a run',
+      description:
+        'One replay run in full: status, workflow, trigger, timing, every step with its status and message, failed assertions, application error signals, oracle verdicts and evidence ids. Run ids appear in findings (mw_finding) and in mw_run job results.',
+      inputSchema: { id: z.string().describe('Run id (run_...)') },
+      annotations: READ,
+    },
+    safe(async (args) => {
+      const run = await engine.store.runs.get(args.id);
+      if (!run) throw new MutationWorkflowError('NOT_FOUND', `No run with id ${args.id}`);
+      return textResult(formatRunDetail(run), run);
     }),
   );
 

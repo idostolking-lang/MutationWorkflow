@@ -12,6 +12,7 @@ import {
   openSqliteStore,
   parseConfig,
   QuestionSchema,
+  RunSchema,
   resolveConfig,
   silentLogger,
 } from '@mutationworkflow/core';
@@ -39,6 +40,22 @@ const TOOLS = [
   'mw_search',
   'mw_report',
   'mw_evidence',
+  'mw_run_detail',
+  'mw_inspect_brief',
+  'mw_inspect_apply',
+  'mw_explore_open',
+  'mw_observe',
+  'mw_act',
+  'mw_check',
+  'mw_save_workflow',
+  'mw_reset_session',
+  'mw_use_identity',
+  'mw_list_known_workflows',
+  'mw_explore_close',
+  'mw_triage_brief',
+  'mw_triage_apply',
+  'mw_mutation_brief',
+  'mw_mutation_apply',
 ];
 
 let dir: string;
@@ -164,6 +181,32 @@ describe('MCP server', () => {
     ]);
     const result = await call('mw_evidence', { id });
     expect(text(result)).toContain('TypeError: boom');
+  });
+
+  it('shows a run record', async () => {
+    const workflow = await insertWorkflow();
+    const run = RunSchema.parse({
+      id: newId('run'),
+      workflowId: workflow.id,
+      targetId: 'web',
+      trigger: 'mcp',
+      status: 'failed',
+      startedAt: nowIso(),
+      finishedAt: nowIso(),
+      durationMs: 50,
+      steps: [{ stepId: 's1', index: 0, status: 'failed', durationMs: 50, message: 'no button' }],
+      oracles: [{ oracle: 'step-failure', verdict: 'fail' }],
+      context: {},
+    });
+    await engine.store.runs.insert(run);
+    const result = await call('mw_run_detail', { id: run.id });
+    expect(result.isError).toBeFalsy();
+    expect(text(result)).toContain('1. s1 failed: no button');
+    expect(text(result)).toContain('step-failure fail');
+    expect(json(result)).toMatchObject({ id: run.id, status: 'failed' });
+    const missing = await call('mw_run_detail', { id: 'run_missing' });
+    expect(missing.isError).toBe(true);
+    expect(text(missing)).toContain('No run with id run_missing');
   });
 
   it('turns failures into isError results', async () => {

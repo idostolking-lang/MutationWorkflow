@@ -120,6 +120,7 @@ export function formatStatus(status: StatusSummary): string {
       'agents: disabled (install Claude Code or Codex, or set ANTHROPIC_API_KEY or OPENAI_API_KEY)',
     );
   }
+  for (const problem of agents.problems) lines.push(`problem: ${problem}`);
   lines.push(`usage: ${formatUsage(status.usage)}`);
   if (status.openQuestions > 0) {
     lines.push(`${status.openQuestions} open question(s): see "mw questions"`);
@@ -287,6 +288,54 @@ export function formatRunLine(
   const mutation = workflow.mutation ? ` · ${workflow.mutation.description}` : '';
   const error = run.error ? ` · ${oneLine(run.error, 80)}` : '';
   return `[${done}/${total}] ${status} ${workflow.title}${mutation} (${formatDuration(run.durationMs)})${error}`;
+}
+
+/** One run in full: status, steps, failed assertions, signals and oracle verdicts. */
+export function formatRunDetail(run: Run): string {
+  const lines = [
+    `Run ${run.id}: ${run.status} (${formatDuration(run.durationMs)})`,
+    `workflow: ${run.workflowId} · target: ${run.targetId} · trigger: ${run.trigger}${run.context.mutated ? ' · mutated' : ''}`,
+    `started: ${run.startedAt} · finished: ${run.finishedAt}`,
+  ];
+  if (run.error) lines.push(`error: ${oneLine(run.error, 300)}`);
+  lines.push('', `Steps (${run.steps.length}):`);
+  for (const step of run.steps) {
+    const message = step.message ? `: ${oneLine(step.message, 200)}` : '';
+    lines.push(`  ${step.index + 1}. ${step.stepId} ${step.status}${message}`);
+  }
+  const failed = run.assertions.filter((a) => !a.passed);
+  if (failed.length > 0) {
+    lines.push('', `Failed assertions (${failed.length} of ${run.assertions.length}):`);
+    for (const a of failed) {
+      const label =
+        typeof a.assertion['description'] === 'string'
+          ? a.assertion['description']
+          : JSON.stringify(a.assertion);
+      lines.push(
+        `  - [${a.scope}${a.stepId ? ` ${a.stepId}` : ''}] ${oneLine(label, 160)}${a.message ? `: ${oneLine(a.message, 160)}` : ''}`,
+      );
+    }
+  } else if (run.assertions.length > 0) {
+    lines.push('', `Assertions: all ${run.assertions.length} passed`);
+  }
+  if (run.signals.length > 0) {
+    lines.push('', `Signals (${run.signals.length}):`);
+    for (const signal of run.signals) {
+      lines.push(
+        `  - ${signal.kind}${signal.stepId ? ` at ${signal.stepId}` : ''}: ${oneLine(signal.message, 200)}`,
+      );
+    }
+  }
+  if (run.oracles.length > 0) {
+    lines.push('', 'Oracles:');
+    for (const oracle of run.oracles) {
+      const severity = oracle.severity ? ` (${oracle.severity})` : '';
+      const summary = oracle.summary ? `: ${oneLine(oracle.summary, 200)}` : '';
+      lines.push(`  - ${oracle.oracle} ${oracle.verdict}${severity}${summary}`);
+    }
+  }
+  if (run.evidenceIds.length > 0) lines.push('', `Evidence: ${run.evidenceIds.join(', ')}`);
+  return lines.join('\n');
 }
 
 export function formatRunSummary(summary: RunSummary): string {

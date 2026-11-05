@@ -3,6 +3,8 @@ import {
   MutationWorkflowError,
   parseConfig,
   type Run,
+  RunSchema,
+  type StatusSummary,
   type Workflow,
   WorkflowSchema,
 } from '@mutationworkflow/core';
@@ -15,7 +17,9 @@ import {
   formatDuration,
   formatFindingDetail,
   formatFindings,
+  formatRunDetail,
   formatRunLine,
+  formatStatus,
   oneLine,
   table,
 } from './format.js';
@@ -94,6 +98,72 @@ describe('domain formatting', () => {
     expect(formatRunLine(run, workflow, 3, 12)).toBe(
       '[3/12] failed  Add a todo · repeat step 2 (1.2s)',
     );
+  });
+
+  it('renders a run in detail', () => {
+    const run = RunSchema.parse({
+      id: 'run_1',
+      workflowId: 'wf_1',
+      targetId: 'web',
+      trigger: 'mcp',
+      status: 'failed',
+      startedAt: NOW,
+      finishedAt: NOW,
+      durationMs: 1_200,
+      steps: [
+        { stepId: 's1', index: 0, status: 'passed', durationMs: 10 },
+        { stepId: 's2', index: 1, status: 'failed', durationMs: 20, message: 'button missing' },
+      ],
+      assertions: [
+        {
+          assertion: { type: 'count', n: 1, description: 'one item' },
+          scope: 'final',
+          passed: false,
+          message: 'found 2',
+        },
+      ],
+      signals: [
+        { kind: 'console-error', message: 'boom', signature: 'boom', stepId: 's2', at: NOW },
+      ],
+      oracles: [{ oracle: 'assertions', verdict: 'fail', severity: 'medium', summary: '1 failed' }],
+      evidenceIds: ['ev_1'],
+      context: {},
+    });
+    const text = formatRunDetail(run);
+    expect(text).toContain('Run run_1: failed (1.2s)');
+    expect(text).toContain('workflow: wf_1 · target: web · trigger: mcp');
+    expect(text).toContain('2. s2 failed: button missing');
+    expect(text).toContain('[final] one item: found 2');
+    expect(text).toContain('console-error at s2: boom');
+    expect(text).toContain('assertions fail (medium): 1 failed');
+    expect(text).toContain('Evidence: ev_1');
+  });
+
+  it('prints agent problems in the status', () => {
+    const status: StatusSummary = {
+      project: { name: 'demo', rootDir: '/demo' },
+      targets: [],
+      agents: {
+        enabled: true,
+        providers: ['claude-code'],
+        maxParallel: 2,
+        models: { explorer: 'claude-code (its own default)' },
+        problems: ['triager: no model configured'],
+      },
+      usage: {
+        calls: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: 0,
+      },
+      openQuestions: 0,
+    };
+    const text = formatStatus(status);
+    expect(text).toContain('models: explorer=claude-code (its own default)');
+    expect(text).toContain('problem: triager: no model configured');
+    expect(text.indexOf('problem:')).toBeGreaterThan(text.indexOf('models:'));
   });
 
   it('renders findings as a table and in detail', () => {
