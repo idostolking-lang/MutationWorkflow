@@ -142,9 +142,12 @@ only when something is new. Details in [docs/agents.md](docs/agents.md).
 ## Safety
 
 MutationWorkflow only ever drives an application it started locally or a localhost URL you point
-it at. Agents are fenced by `scope`: allowed and denied URL patterns, and text patterns of
-controls they must never activate (`"Pay"`, `"Delete account"`). The config file runs the
-commands you put in it, so review it like code. See [SECURITY.md](SECURITY.md).
+it at: web targets must use a loopback base URL unless you opt out with `allowRemoteBaseUrl`.
+Agents are fenced by `scope`. Allowed and denied URL patterns are enforced inside the browser
+before a request leaves, and text patterns name controls agents must never activate (`"Pay"`,
+`"Delete account"`). The config file runs the commands you put in it, so review it like code:
+`mw setup` writes start commands proposed by a model and only runs them when you ask with
+`--validate`. See [SECURITY.md](SECURITY.md).
 
 ## Architecture
 
