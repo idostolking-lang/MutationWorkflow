@@ -1,4 +1,5 @@
 import {
+  type AgentRole,
   type Engine,
   type Job,
   type JobContext,
@@ -64,13 +65,39 @@ export async function runJob<T>(
   }
 }
 
-/** Fail fast, before a job is recorded, when an operation needs a model provider. */
-export function requireAgents(engine: Engine, action: string): void {
-  if (engine.agents.enabled) return;
-  throw new MutationWorkflowError(
-    'PROVIDER_NOT_CONFIGURED',
-    `"${action}" needs a model provider. Install Claude Code or Codex, set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add a providers section to the config.`,
-  );
+export interface RequireAgentsOptions {
+  /** The role the operation runs; checked too, so a role without a model fails before the job. */
+  role?: AgentRole;
+  /** The MCP tool a connected coding agent can call to do the work itself, without a provider. */
+  clientTool?: string;
+}
+
+/**
+ * Fail fast, before a job is recorded, when an operation needs a model provider. The error
+ * carries `clientTool` in its details so the MCP surface can point at the client-driven tool.
+ */
+export function requireAgents(
+  engine: Engine,
+  action: string,
+  options: RequireAgentsOptions = {},
+): void {
+  const details = options.clientTool ? { clientTool: options.clientTool } : undefined;
+  if (!engine.agents.enabled) {
+    throw new MutationWorkflowError(
+      'PROVIDER_NOT_CONFIGURED',
+      `"${action}" needs a model provider. Install Claude Code or Codex, set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add a providers section to the config.`,
+      { details },
+    );
+  }
+  if (!options.role) return;
+  try {
+    engine.agents.resolveModel(options.role);
+  } catch (error) {
+    if (error instanceof MutationWorkflowError) {
+      throw new MutationWorkflowError(error.code, error.message, { cause: error, details });
+    }
+    throw error;
+  }
 }
 
 /** Resolve target ids (all when empty) and fail when nothing is configured. */

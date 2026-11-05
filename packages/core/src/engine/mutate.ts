@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { Adapter } from '../adapter/types.js';
 import {
   type AgentVariants,
@@ -16,16 +17,21 @@ import {
   workflowFingerprint,
 } from '../schema/index.js';
 import type { Store } from '../store/types.js';
+import { MutationWorkflowError } from '../util/errors.js';
 import type { Logger } from '../util/logger.js';
 import { workflowProblem } from './identity.js';
 
-export interface MutateDeps {
+/** What mutation needs regardless of who proposes the agent variants. */
+export interface MutationContextDeps {
   store: Store;
-  config: Config;
   target: TargetConfig;
   adapter: Adapter;
-  runtime?: AgentRuntime;
   logger: Logger;
+}
+
+export interface MutateDeps extends MutationContextDeps {
+  config: Config;
+  runtime?: AgentRuntime;
   jobId?: string;
   signal?: AbortSignal;
   onEvent?: (event: AgentEvent) => void;
@@ -47,8 +53,16 @@ export interface MutateResult {
   fromAgent: number;
 }
 
+/** Everything a mutator needs for one base workflow, in-process or in a connected coding agent. */
+export interface MutationBrief {
+  system: string;
+  task: string;
+  /** JSON Schema of the variants to submit. */
+  variantsSchema: Record<string, unknown>;
+}
+
 const MAX_AGENT_BASES = 10;
-const MAX_AGENT_VARIANTS = 6;
+export const MAX_AGENT_VARIANTS = 6;
 
 /**
  * Derive new workflow variants for a target. Deterministic operators run first and are cheap;
@@ -70,10 +84,9 @@ export async function mutate(deps: MutateDeps, options: MutateOptions = {}): Pro
     (await store.workflows.list({ targetId: target.id })).map((w) => w.fingerprint),
   );
   const operators = resolveOperators(options.operators ?? config.mutations.operators);
-  const description = adapter.describe();
   const context: MutationContext = {
     target,
-    hints: description.hints,
+    hints: adapter.describe().hints,
     siblings: allBases,
     config: config.mutations,
   };
@@ -108,7 +121,25 @@ export async function mutate(deps: MutateDeps, options: MutateOptions = {}): Pro
   if (options.agent && deps.runtime?.enabled) {
     for (const base of bases.slice(0, MAX_AGENT_BASES)) {
       if (deps.signal?.aborted) break;
-      fromAgent += await agentVariants(deps, base, existing, created, description);
+      const brief = await mutationBrief(deps, base);
+      const result = await deps.runtime.run({
+        role: 'mutator',
+        delegate: false,
+        system: brief.system,
+        task: `${brief.task} Submit them with the finish tool.`,
+        tools: [],
+        output: AgentVariantsSchema,
+        jobId: deps.jobId,
+        signal: deps.signal,
+        onEvent: deps.onEvent,
+      });
+      if (!result.output) {
+        logger.warn(`Mutator produced nothing for "${base.title}" (${result.stoppedBecause})`);
+        continue;
+      }
+      const added = await applyAgentVariants(deps, base, result.output, existing);
+      created.push(...added);
+      fromAgent += added.length;
     }
     logger.info(`Mutator agent produced ${fromAgent} new variant(s)`);
   } else if (options.agent) {
@@ -118,43 +149,55 @@ export async function mutate(deps: MutateDeps, options: MutateOptions = {}): Pro
   return { created, bases: bases.length, fromOperators, fromAgent };
 }
 
-async function agentVariants(
-  deps: MutateDeps,
+export async function mutationBrief(
+  deps: MutationContextDeps,
   base: Workflow,
-  existing: Set<string>,
-  created: Workflow[],
-  description: ReturnType<Adapter['describe']>,
-): Promise<number> {
-  const { store, target, adapter, logger, runtime } = deps;
-  if (!runtime) return 0;
-  const siblings = await store.workflows.list({ parentId: base.id });
-  const result = await runtime.run({
-    role: 'mutator',
-    delegate: false,
+): Promise<MutationBrief> {
+  const siblings = await deps.store.workflows.list({ parentId: base.id });
+  const { $schema: _ignored, ...variantsSchema } = z.toJSONSchema(AgentVariantsSchema, {
+    io: 'input',
+    target: 'draft-2020-12',
+  }) as Record<string, unknown>;
+  return {
     system: mutatorPrompt({
-      target,
-      adapter: description,
+      target: deps.target,
+      adapter: deps.adapter.describe(),
       workflow: base,
       existingVariantDescriptions: siblings.map((s) => s.mutation?.description ?? s.title),
       maxVariants: MAX_AGENT_VARIANTS,
     }),
-    task: `Propose variants of the workflow "${base.title}" and submit them with finish.`,
-    tools: [],
-    output: AgentVariantsSchema,
-    jobId: deps.jobId,
-    signal: deps.signal,
-    onEvent: deps.onEvent,
-  });
-  if (!result.output) {
-    logger.warn(`Mutator produced nothing for "${base.title}" (${result.stoppedBecause})`);
-    return 0;
+    task: `Propose variants of the workflow "${base.title}".`,
+    variantsSchema,
+  };
+}
+
+/**
+ * Store agent-proposed variants of a base workflow: positional step ids, the base's status and
+ * identity, expectations only when the proposal keeps them, and no duplicates by fingerprint.
+ */
+export async function applyAgentVariants(
+  deps: MutationContextDeps,
+  base: Workflow,
+  rawVariants: unknown,
+  existing?: Set<string>,
+): Promise<Workflow[]> {
+  const { store, target, adapter, logger } = deps;
+  const parsed = AgentVariantsSchema.safeParse(rawVariants);
+  if (!parsed.success) {
+    throw new MutationWorkflowError(
+      'INVALID_INPUT',
+      `The proposed variants are invalid:\n${z.prettifyError(parsed.error)}`,
+    );
   }
-  let count = 0;
-  for (const proposal of (result.output as AgentVariants).variants) {
+  const known =
+    existing ??
+    new Set((await store.workflows.list({ targetId: target.id })).map((w) => w.fingerprint));
+  const added: Workflow[] = [];
+  for (const proposal of (parsed.data as AgentVariants).variants) {
     // Ids the model copied from the base would collide; positions decide them.
     const steps = normalizeSteps(proposal.steps.map(({ id: _id, ...step }) => step));
     const fingerprint = workflowFingerprint(target.id, base.identity, steps);
-    if (existing.has(fingerprint)) continue;
+    if (known.has(fingerprint)) continue;
     const workflow = createWorkflow(
       target.id,
       {
@@ -178,9 +221,8 @@ async function agentVariants(
       continue;
     }
     await store.workflows.insert(workflow);
-    existing.add(fingerprint);
-    created.push(workflow);
-    count += 1;
+    known.add(fingerprint);
+    added.push(workflow);
   }
-  return count;
+  return added;
 }

@@ -27,7 +27,18 @@ export class CliExit extends Error {
 export type Surface = 'cli' | 'mcp';
 
 const MCP_KEY_HINT =
-  'Pass a key to the MCP server, e.g. `claude mcp add mutationworkflow -e ANTHROPIC_API_KEY=... -- npx -y mutationworkflow mcp` (or set OPENAI_API_KEY), then restart the server.';
+  'Or give the server a provider: pass a key, e.g. `claude mcp add mutationworkflow -e ANTHROPIC_API_KEY=... -- npx -y mutationworkflow mcp` (or set OPENAI_API_KEY, and agents.defaults.model in the config), or configure a `claude-code` or `codex` provider, then restart the server.';
+const CLIENT_TOOLS = 'mw_inspect_brief / mw_explore_open / mw_triage_brief / mw_mutation_brief';
+
+/** The MCP hint for a missing provider: the client-driven tool first, then a provider. */
+function mcpProviderHint(error: MutationWorkflowError): string {
+  const tool = error.details?.['clientTool'];
+  const yourself =
+    typeof tool === 'string'
+      ? `You can do this yourself, with your own model and no API key: call ${tool} and follow the brief it returns.`
+      : `You can do this yourself, with your own model and no API key: call ${CLIENT_TOOLS}.`;
+  return `${yourself}\n${MCP_KEY_HINT}`;
+}
 const CLI_KEY_HINT =
   'Install Claude Code or Codex, export ANTHROPIC_API_KEY or OPENAI_API_KEY, or configure `providers` in the config, and retry.';
 
@@ -37,10 +48,10 @@ export function describeError(error: unknown, surface: Surface): string {
   switch (error.code) {
     case 'CONFIG_NOT_FOUND':
       return surface === 'mcp'
-        ? `${error.message} Call mw_setup to let the agents write one, or run \`npx mutationworkflow init\` in the project. If the server runs outside the project, set MW_PROJECT_DIR.`
+        ? `${error.message} Call mw_inspect_brief to inspect the repository yourself and write one (or mw_setup when the server has a model provider), or run \`npx mutationworkflow init\` in the project. If the server runs outside the project, set MW_PROJECT_DIR.`
         : `${error.message} Use --cwd <dir> to point at another project.`;
     case 'PROVIDER_NOT_CONFIGURED':
-      return `${error.message}\n${surface === 'mcp' ? MCP_KEY_HINT : CLI_KEY_HINT}`;
+      return `${error.message}\n${surface === 'mcp' ? mcpProviderHint(error) : CLI_KEY_HINT}`;
     case 'CONFIG_INVALID':
       return `The configuration is invalid. ${error.message}`;
     case 'ADAPTER_NOT_FOUND':

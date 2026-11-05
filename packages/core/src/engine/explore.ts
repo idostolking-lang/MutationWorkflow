@@ -10,7 +10,15 @@ import {
 } from '../agents/prompts/explorer.js';
 import type { ImagePart, TextPart } from '../agents/provider.js';
 import type { AgentEvent, AgentRuntime, StopCause } from '../agents/runtime.js';
-import { type AgentTool, defineTool, fail, ok } from '../agents/tools.js';
+import {
+  type AgentTool,
+  defineTool,
+  fail,
+  ok,
+  runTool,
+  type ToolContext,
+  type ToolOutput,
+} from '../agents/tools.js';
 import type { Config } from '../config/schema.js';
 import {
   ActionSchema,
@@ -34,15 +42,19 @@ import type { Logger } from '../util/logger.js';
 import { truncate } from '../util/text.js';
 import { applyIdentity } from './identity.js';
 
-export interface ExploreDeps {
+/** What a live exploration session needs; no model involved. */
+export interface ExplorationSessionDeps {
   store: Store;
-  runtime: AgentRuntime;
   config: Config;
   target: TargetConfig;
   adapter: Adapter;
   evidenceRoot: string;
-  baseUrl?: string;
   logger: Logger;
+}
+
+export interface ExploreDeps extends ExplorationSessionDeps {
+  runtime: AgentRuntime;
+  baseUrl?: string;
   jobId?: string;
   signal?: AbortSignal;
   onEvent?: (event: AgentEvent) => void;
@@ -63,6 +75,13 @@ export interface ExploreResult {
   errors: string[];
 }
 
+/** Budget shared by explorers working on the same target at the same time. */
+export interface SharedBudget {
+  titles: Set<string>;
+  saved: number;
+  budget: number;
+}
+
 /** Default angles when the operator gives no focus, so parallel explorers do not overlap. */
 const ANGLES = [
   'the primary user journeys, end to end',
@@ -70,6 +89,30 @@ const ANGLES = [
   'navigation and recovery: back, reload, revisiting completed flows, stale views',
   'secondary features, settings and less obvious screens or commands',
 ];
+
+/** The explorer's instructions: the same text whether an in-process agent or a client reads them. */
+export function explorerInstructions(
+  deps: ExplorationSessionDeps,
+  options: {
+    assignment: string;
+    maxWorkflows: number;
+    knownTitles: ReadonlyArray<string>;
+    baseUrl?: string;
+  },
+): { system: string; task: string } {
+  const where = options.baseUrl ? ` The application is served at ${options.baseUrl}.` : '';
+  return {
+    system: explorerPrompt({
+      target: deps.target,
+      adapter: deps.adapter.describe(),
+      focus: [options.assignment],
+      maxWorkflows: options.maxWorkflows,
+      maxSteps: deps.config.exploration.maxStepsPerWorkflow,
+      knownWorkflowTitles: [...options.knownTitles],
+    }),
+    task: `Explore the application.${where} Your assignment: ${options.assignment}. Start by observing or navigating, record journeys with save_workflow, and call finish when you have saved ${options.maxWorkflows} workflows or run out of worthwhile journeys.`,
+  };
+}
 
 /**
  * Run one or more explorer agents against a live target. Each explorer drives its own isolated
@@ -94,19 +137,18 @@ export async function explore(
     parentId: null,
     status: ['active', 'pending-review'],
   });
-  const shared: SharedState = {
+  const shared: SharedBudget = {
     titles: new Set(known.map((w) => w.title)),
     saved: 0,
     budget: total,
   };
   const fatal = new AbortController();
   const signal = deps.signal ? AbortSignal.any([deps.signal, fatal.signal]) : fatal.signal;
-  const description = deps.adapter.describe();
   const settled = await Promise.allSettled(
     assign(focus, explorers).map((assignment, index) =>
       runExplorer(
         { ...deps, signal },
-        { assignment, index, description, shared, maxWorkflows: Math.ceil(total / explorers) },
+        { assignment, index, shared, maxWorkflows: Math.ceil(total / explorers) },
       ).catch((error: unknown) => {
         fatal.abort();
         throw error;
@@ -127,7 +169,8 @@ export async function explore(
   };
 }
 
-function assign(focus: string[], explorers: number): string[] {
+/** Split focus areas over explorers, or fall back to the default angles. */
+export function assign(focus: ReadonlyArray<string>, explorers: number): string[] {
   if (focus.length === 0) {
     return Array.from(
       { length: explorers },
@@ -141,17 +184,10 @@ function assign(focus: string[], explorers: number): string[] {
   );
 }
 
-interface SharedState {
-  titles: Set<string>;
-  saved: number;
-  budget: number;
-}
-
 interface ExplorerRunOptions {
   assignment: string;
   index: number;
-  description: AdapterDescription;
-  shared: SharedState;
+  shared: SharedBudget;
   maxWorkflows: number;
 }
 
@@ -166,30 +202,24 @@ async function runExplorer(
   deps: ExploreDeps,
   options: ExplorerRunOptions,
 ): Promise<ExplorerRunResult> {
-  const { target, config, logger } = deps;
-  const sessionId = newId('ses');
-  const vision = deps.runtime.resolveModel('explorer').vision;
-  const session = new ExplorerSession(deps, {
-    sessionId,
-    vision,
-    maxSteps: config.exploration.maxStepsPerWorkflow,
+  const { logger } = deps;
+  const session = new ExplorationSession(deps, {
+    vision: deps.runtime.resolveModel('explorer').vision,
     shared: options.shared,
   });
   await session.open();
   try {
-    const where = deps.baseUrl ? ` The application is served at ${deps.baseUrl}.` : '';
+    const instructions = explorerInstructions(deps, {
+      assignment: options.assignment,
+      maxWorkflows: options.maxWorkflows,
+      knownTitles: [...options.shared.titles],
+      baseUrl: deps.baseUrl,
+    });
     const result = await deps.runtime.run({
       role: 'explorer',
       delegate: false,
-      system: explorerPrompt({
-        target,
-        adapter: options.description,
-        focus: [options.assignment],
-        maxWorkflows: options.maxWorkflows,
-        maxSteps: config.exploration.maxStepsPerWorkflow,
-        knownWorkflowTitles: [...options.shared.titles],
-      }),
-      task: `Explore the application.${where} Your assignment: ${options.assignment}. Start by observing or navigating, record journeys with save_workflow, and call finish when you have saved ${options.maxWorkflows} workflows or run out of worthwhile journeys.`,
+      system: instructions.system,
+      task: instructions.task,
       tools: session.tools(),
       output: ExplorationSummarySchema,
       jobId: deps.jobId,
@@ -208,18 +238,21 @@ async function runExplorer(
   }
 }
 
-interface ExplorerSessionOptions {
-  sessionId: string;
+export interface ExplorationSessionOptions {
+  sessionId?: string;
+  /** Attach screenshots to observations (as images) for runtimes that can see them. */
   vision: boolean;
-  maxSteps: number;
-  shared: SharedState;
+  maxSteps?: number;
+  shared?: SharedBudget;
 }
 
 /**
  * One explorer's live session: wraps an adapter session, records performed actions, and exposes
- * the tools the explorer agent uses.
+ * the tools the explorer uses. The same class serves an in-process agent, an external coding
+ * agent driver, or a coding agent connected over MCP that calls the tools one by one.
  */
-class ExplorerSession {
+export class ExplorationSession {
+  readonly id: string;
   readonly saved: Workflow[] = [];
   readonly questions: Question[] = [];
   private session: AdapterSession | undefined;
@@ -227,22 +260,38 @@ class ExplorerSession {
   private identity: string | undefined;
   private persistedEvidence = 0;
   private readonly sink: EvidenceSink;
+  private readonly shared: SharedBudget;
+  private readonly maxSteps: number;
+  private readonly context: ToolContext;
 
   constructor(
-    private readonly deps: ExploreDeps,
-    private readonly options: ExplorerSessionOptions,
+    private readonly deps: ExplorationSessionDeps,
+    private readonly options: ExplorationSessionOptions,
   ) {
+    this.id = options.sessionId ?? newId('ses');
+    this.shared = options.shared ?? {
+      titles: new Set(),
+      saved: 0,
+      budget: deps.config.exploration.maxWorkflows,
+    };
+    this.maxSteps = options.maxSteps ?? deps.config.exploration.maxStepsPerWorkflow;
+    this.context = { role: 'explorer', depth: 0, logger: deps.logger.child('explore') };
     this.sink = new EvidenceSink({
       rootDir: deps.evidenceRoot,
-      sessionDir: `explore/${options.sessionId}`,
-      sessionId: options.sessionId,
+      sessionDir: `explore/${this.id}`,
+      sessionId: this.id,
     });
+  }
+
+  /** How many more workflows this session may save. */
+  get remainingBudget(): number {
+    return Math.max(0, this.shared.budget - this.shared.saved);
   }
 
   async open(): Promise<void> {
     const { config, target, logger } = this.deps;
     this.session = await this.deps.adapter.open({
-      sessionId: this.options.sessionId,
+      sessionId: this.id,
       evidence: this.sink,
       screenshots: config.execution.screenshots === 'never' ? 'never' : 'on-failure',
       stepTimeoutMs: config.execution.stepTimeoutMs,
@@ -256,6 +305,11 @@ class ExplorerSession {
     await this.persistEvidence();
     await this.session?.close().catch(() => undefined);
     this.session = undefined;
+  }
+
+  /** Run one of this session's tools by name, with validation; never throws. */
+  callTool(name: string, input: unknown): Promise<ToolOutput> {
+    return runTool(this.tools(), name, input, this.context);
   }
 
   tools(): AgentTool[] {
@@ -284,9 +338,9 @@ class ExplorerSession {
           } catch (error) {
             return fail(`Invalid action: ${errorMessage(error)}`);
           }
-          if (this.recorded.length >= this.options.maxSteps) {
+          if (this.recorded.length >= this.maxSteps) {
             return fail(
-              `This journey already has ${this.options.maxSteps} steps. Save it with save_workflow or reset.`,
+              `This journey already has ${this.maxSteps} steps. Save it with save_workflow or reset.`,
             );
           }
           const outcome = await session.perform(validated, {
@@ -301,7 +355,9 @@ class ExplorerSession {
                 : ' · not recorded'
             }`,
             signals.length > 0
-              ? `Application signals: ${signals.map((s) => `${s.kind}: ${truncate(s.message, 200)}`).join(' | ')}`
+              ? `Application signals: ${signals
+                  .map((s) => `${s.kind}: ${truncate(s.message, 200)}`)
+                  .join(' | ')}`
               : undefined,
           ].filter((line): line is string => Boolean(line));
           return ok(await this.observation(header.join('\n')));
@@ -361,7 +417,7 @@ class ExplorerSession {
         description: 'List the workflows already in memory for this target, to avoid duplicates.',
         schema: z.object({}),
         execute: async () => {
-          const titles = [...this.options.shared.titles];
+          const titles = [...this.shared.titles];
           return ok(titles.length > 0 ? titles.map((t) => `- ${t}`).join('\n') : '(none yet)');
         },
       }),
@@ -381,8 +437,9 @@ class ExplorerSession {
                     'Steps are already recorded in this journey. Call reset first, then use_identity.',
                   );
                 }
-                if (!target.identities.some((i) => i.id === id))
+                if (!target.identities.some((i) => i.id === id)) {
                   return fail(`Unknown identity "${id}"`);
+                }
                 try {
                   await applyIdentity(this.live(), target, id);
                 } catch (error) {
@@ -440,7 +497,7 @@ class ExplorerSession {
     if (this.recorded.length === 0) {
       return fail('No steps recorded since the last save or reset. Perform the journey first.');
     }
-    if (this.options.shared.saved >= this.options.shared.budget) {
+    if (this.remainingBudget === 0) {
       return fail(
         'The workflow budget for this session is used up. Call finish with your summary.',
       );
@@ -452,10 +509,11 @@ class ExplorerSession {
         const validated = adapter.validateAssertion(assertion);
         const result = await this.live().check(validated);
         if (result.passed) verified.push(validated);
-        else
+        else {
           dropped.push(
             `${JSON.stringify(assertion)}${result.message ? ` (${result.message})` : ''}`,
           );
+        }
       } catch (error) {
         dropped.push(`${JSON.stringify(assertion)} (invalid: ${errorMessage(error)})`);
       }
@@ -476,8 +534,8 @@ class ExplorerSession {
     );
     await store.workflows.insert(workflow);
     this.saved.push(workflow);
-    this.options.shared.saved += 1;
-    this.options.shared.titles.add(title);
+    this.shared.saved += 1;
+    this.shared.titles.add(title);
 
     const screenshot = await this.live()
       .capture('screenshot', `final-${workflow.id}`)
@@ -505,7 +563,7 @@ class ExplorerSession {
     });
     await store.questions.insert(question);
     this.questions.push(question);
-    const remaining = this.options.shared.budget - this.options.shared.saved;
+    const remaining = this.remainingBudget;
     const droppedNote =
       dropped.length > 0
         ? ` Dropped ${dropped.length} expectation(s) that did not hold: ${dropped.join('; ')}.`
@@ -526,3 +584,5 @@ class ExplorerSession {
     await this.deps.store.evidence.insertMany(fresh);
   }
 }
+
+export type { AdapterDescription };

@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
+import { z } from 'zod';
+import type { AdapterDescription } from '../adapter/types.js';
 import {
   type InspectionReport,
   InspectionReportSchema,
@@ -28,9 +30,9 @@ import type { AdapterRegistry } from './adapters.js';
 import { workflowProblem } from './identity.js';
 import { repositoryTools } from './repo-tools.js';
 
-export interface SetupDeps {
+/** What setup needs regardless of who does the inspecting. */
+export interface SetupContext {
   store: Store;
-  runtime: AgentRuntime;
   registry: AdapterRegistry;
   environments: EnvironmentManager;
   rootDir: string;
@@ -38,6 +40,10 @@ export interface SetupDeps {
   configPath?: string;
   existing?: Config;
   logger: Logger;
+}
+
+export interface SetupDeps extends SetupContext {
+  runtime: AgentRuntime;
   jobId?: string;
   signal?: AbortSignal;
   onEvent?: (event: AgentEvent) => void;
@@ -63,21 +69,46 @@ export interface SetupResult {
   validation: Array<{ targetId: string; ok: boolean; message?: string }>;
 }
 
+/** Everything an inspector needs to know, for an in-process agent or a connected coding agent. */
+export interface InspectionBrief {
+  system: string;
+  task: string;
+  /** JSON Schema of the report to submit. */
+  reportSchema: Record<string, unknown>;
+  adapters: AdapterDescription[];
+}
+
+export async function inspectionBrief(
+  context: SetupContext,
+  options: SetupOptions = {},
+): Promise<InspectionBrief> {
+  const projectName =
+    options.projectName ?? context.existing?.project.name ?? basename(context.rootDir);
+  const adapters = await context.registry.describeRegistered();
+  const { $schema: _ignored, ...reportSchema } = z.toJSONSchema(InspectionReportSchema, {
+    io: 'input',
+    target: 'draft-2020-12',
+  }) as Record<string, unknown>;
+  return {
+    system: inspectorPrompt({ projectName, rootDir: context.rootDir, adapters }),
+    task: `Inspect the project at ${context.rootDir} and submit the inspection report.`,
+    reportSchema,
+    adapters,
+  };
+}
+
 /**
  * Let the inspector agent (and its delegates) study the repository, then turn its report into a
  * configuration, seed workflows and questions. Existing config files are never rewritten; the
  * proposal is saved next to the database for the team to merge by hand.
  */
 export async function setup(deps: SetupDeps, options: SetupOptions = {}): Promise<SetupResult> {
-  const { rootDir, logger, store } = deps;
-  const projectName = options.projectName ?? deps.existing?.project.name ?? basename(rootDir);
-  const adapters = await deps.registry.describeRegistered();
-
+  const brief = await inspectionBrief(deps, options);
   const result = await deps.runtime.run({
     role: 'inspector',
-    system: inspectorPrompt({ projectName, rootDir, adapters }),
-    task: `Inspect the project at ${rootDir} and submit the inspection report with the finish tool.`,
-    tools: repositoryTools(rootDir),
+    system: brief.system,
+    task: `${brief.task} Use the finish tool for the report.`,
+    tools: repositoryTools(deps.rootDir),
     output: InspectionReportSchema,
     jobId: deps.jobId,
     signal: deps.signal,
@@ -89,19 +120,41 @@ export async function setup(deps: SetupDeps, options: SetupOptions = {}): Promis
       `The inspector did not produce a report (${result.stoppedBecause}${result.error ? `: ${result.error}` : ''})`,
     );
   }
-  const report = result.output as InspectionReport;
+  return applyInspectionReport(deps, result.output as InspectionReport, options);
+}
+
+/**
+ * Turn an inspection report into configuration, seed workflows and questions. The report may come
+ * from the in-process inspector or from a coding agent that inspected the repository itself.
+ */
+export async function applyInspectionReport(
+  context: SetupContext,
+  rawReport: unknown,
+  options: SetupOptions = {},
+): Promise<SetupResult> {
+  const { rootDir, logger, store } = context;
+  const parsed = InspectionReportSchema.safeParse(rawReport);
+  if (!parsed.success) {
+    throw new MutationWorkflowError(
+      'INVALID_INPUT',
+      `The inspection report is invalid:\n${z.prettifyError(parsed.error)}`,
+    );
+  }
+  const report = parsed.data;
+  const projectName = options.projectName ?? context.existing?.project.name ?? basename(rootDir);
+  const adapters = await context.registry.describeRegistered();
   const targets = report.targets.filter((target) => {
     const adapter = target.adapter ?? target.kind;
-    if (deps.registry.has(adapter) || adapters.some((a) => a.kind === adapter)) return true;
+    if (context.registry.has(adapter) || adapters.some((a) => a.kind === adapter)) return true;
     logger.warn(
       `Dropping proposed target "${target.id}": no adapter named "${adapter}" is available`,
     );
     return false;
   });
 
-  const defaultPath = deps.configPath ?? join(rootDir, 'mutationworkflow.config.yaml');
+  const defaultPath = context.configPath ?? join(rootDir, 'mutationworkflow.config.yaml');
   // Re-check on disk: the config may have appeared since this engine was created.
-  const configExists = Boolean(deps.existing) || existsSync(defaultPath);
+  const configExists = Boolean(context.existing) || existsSync(defaultPath);
   let configPath: string;
   let configAction: SetupResult['configAction'];
   if (!configExists) {
@@ -128,7 +181,7 @@ export async function setup(deps: SetupDeps, options: SetupOptions = {}): Promis
   }
 
   const knownTargets = new Map<string, TargetConfig>();
-  for (const target of deps.existing?.targets ?? []) knownTargets.set(target.id, target);
+  for (const target of context.existing?.targets ?? []) knownTargets.set(target.id, target);
   for (const target of targets) {
     if (!knownTargets.has(target.id)) {
       knownTargets.set(target.id, target);
@@ -136,7 +189,7 @@ export async function setup(deps: SetupDeps, options: SetupOptions = {}): Promis
     }
   }
 
-  const workflows = await seedWorkflows(deps, report, knownTargets);
+  const workflows = await seedWorkflows(context, report, knownTargets);
   const questions: Question[] = [];
   for (const text of report.questions) {
     questions.push(await ask(store, { kind: 'setup', question: text }));
@@ -155,11 +208,10 @@ export async function setup(deps: SetupDeps, options: SetupOptions = {}): Promis
   const validation: SetupResult['validation'] = [];
   if (options.validate === true && configAction === 'created') {
     for (const target of targets.filter((t) => t.environment.start)) {
-      if (deps.signal?.aborted) break;
       logger.info(
         `Validating start command for "${target.id}": ${target.environment.start?.command}`,
       );
-      const outcome = await validateEnvironment(deps.environments, target);
+      const outcome = await validateEnvironment(context.environments, target);
       validation.push(outcome);
       if (!outcome.ok) {
         questions.push(
@@ -176,11 +228,11 @@ export async function setup(deps: SetupDeps, options: SetupOptions = {}): Promis
 }
 
 async function seedWorkflows(
-  deps: SetupDeps,
+  context: SetupContext,
   report: InspectionReport,
   targets: Map<string, TargetConfig>,
 ): Promise<Workflow[]> {
-  const { store, logger } = deps;
+  const { store, logger } = context;
   const created: Workflow[] = [];
   for (const draft of report.workflows) {
     const target = targets.get(draft.targetId);
@@ -199,7 +251,7 @@ async function seedWorkflows(
       logger.warn(`Skipping seed workflow "${draft.title}": ${errorMessage(error)}`);
       continue;
     }
-    const adapter = await deps.registry.forTarget(target).catch(() => undefined);
+    const adapter = await context.registry.forTarget(target).catch(() => undefined);
     const problem = adapter ? workflowProblem(adapter, workflow) : undefined;
     if (problem) {
       logger.warn(`Skipping seed workflow "${draft.title}": ${problem}`);

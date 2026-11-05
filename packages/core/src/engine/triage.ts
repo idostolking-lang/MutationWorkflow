@@ -23,7 +23,7 @@ import {
   type Workflow,
 } from '../schema/index.js';
 import type { Store } from '../store/types.js';
-import { errorMessage } from '../util/errors.js';
+import { errorMessage, MutationWorkflowError } from '../util/errors.js';
 import type { Logger } from '../util/logger.js';
 import { truncate } from '../util/text.js';
 import { describeAction } from './report.js';
@@ -141,18 +141,31 @@ function unique<T>(items: T[]): T[] {
   return [...new Set(items)];
 }
 
-export interface TriageDeps {
+/** What triage needs regardless of who judges. */
+export interface TriageContext {
   store: Store;
-  runtime: AgentRuntime;
   target: TargetConfig;
-  evidenceRoot: string;
   logger: Logger;
+}
+
+export interface TriageDeps extends TriageContext {
+  runtime: AgentRuntime;
+  evidenceRoot: string;
   jobId?: string;
   signal?: AbortSignal;
   onEvent?: (event: AgentEvent) => void;
 }
 
-const BATCH_SIZE = 8;
+/** Everything a triager needs for a batch, in-process or in a connected coding agent. */
+export interface TriageBrief {
+  system: string;
+  task: string;
+  findingIds: string[];
+  /** JSON Schema of the decisions to submit. */
+  decisionSchema: Record<string, unknown>;
+}
+
+export const TRIAGE_BATCH_SIZE = 8;
 
 /**
  * Ask the triager agent to judge pending findings for one target: bug or not, title, summary,
@@ -164,19 +177,16 @@ export async function triageFindings(deps: TriageDeps, findings: Finding[]): Pro
     (f) => f.triage.state === 'pending' && f.targetId === deps.target.id,
   );
   const updated: Finding[] = [];
-  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-    updated.push(...(await triageBatch(deps, pending.slice(i, i + BATCH_SIZE))));
+  for (let i = 0; i < pending.length; i += TRIAGE_BATCH_SIZE) {
+    updated.push(...(await triageBatch(deps, pending.slice(i, i + TRIAGE_BATCH_SIZE))));
   }
   return updated;
 }
 
 async function triageBatch(deps: TriageDeps, batch: Finding[]): Promise<Finding[]> {
-  const { store, runtime, target, logger } = deps;
+  const { store, runtime, logger } = deps;
   const resolved = runtime.resolveModel('triager');
-  const dossiers: string[] = [];
-  for (const finding of batch) {
-    dossiers.push(await dossier(store, finding));
-  }
+  const brief = await triageBrief(deps, batch);
   const tools = [
     defineTool({
       name: 'get_evidence',
@@ -211,10 +221,8 @@ async function triageBatch(deps: TriageDeps, batch: Finding[]): Promise<Finding[
 
   const result = await runtime.run({
     role: 'triager',
-    system: triagerPrompt({ target }),
-    task: `Triage the following ${batch.length} finding(s). Their ids are: ${batch
-      .map((f) => f.id)
-      .join(', ')}.\n\n${dossiers.join('\n\n---\n\n')}`,
+    system: brief.system,
+    task: `${brief.task} Submit your decisions with the finish tool.`,
     tools,
     output: TriageDecisionSchema,
     jobId: deps.jobId,
@@ -227,13 +235,24 @@ async function triageBatch(deps: TriageDeps, batch: Finding[]): Promise<Finding[
     );
     return [];
   }
-  return applyDecisions(
-    store,
-    batch,
-    result.output as TriageDecision,
-    resolved.model ?? resolved.provider.id,
-    logger,
-  );
+  return applyTriageDecisions(deps, batch, result.output, resolved.model ?? resolved.provider.id);
+}
+
+export async function triageBrief(context: TriageContext, batch: Finding[]): Promise<TriageBrief> {
+  const dossiers: string[] = [];
+  for (const finding of batch) dossiers.push(await dossier(context.store, finding));
+  const { $schema: _ignored, ...decisionSchema } = z.toJSONSchema(TriageDecisionSchema, {
+    io: 'input',
+    target: 'draft-2020-12',
+  }) as Record<string, unknown>;
+  return {
+    system: triagerPrompt({ target: context.target }),
+    task: `Triage the following ${batch.length} finding(s). Their ids are: ${batch
+      .map((f) => f.id)
+      .join(', ')}.\n\n${dossiers.join('\n\n---\n\n')}`,
+    findingIds: batch.map((f) => f.id),
+    decisionSchema,
+  };
 }
 
 async function dossier(store: Store, finding: Finding): Promise<string> {
@@ -267,7 +286,9 @@ async function dossier(store: Store, finding: Finding): Promise<string> {
       const baseRun = await store.runs.latestForWorkflow(parentId);
       if (base) {
         lines.push(
-          `Base workflow "${base.title}" last ran ${baseRun ? `${baseRun.status} on ${baseRun.finishedAt}` : 'never'}; ${
+          `Base workflow "${base.title}" last ran ${
+            baseRun ? `${baseRun.status} on ${baseRun.finishedAt}` : 'never'
+          }; ${
             baseRun?.status === 'passed'
               ? 'the unmodified sequence works, so compare against it'
               : 'the unmodified sequence itself is not healthy'
@@ -304,7 +325,7 @@ async function dossier(store: Store, finding: Finding): Promise<string> {
     lines.push('', `Run ${run.id}: ${run.status}${run.error ? ` (${run.error})` : ''}`);
   }
   if (evidence.length > 0) {
-    lines.push('', 'Evidence (use get_evidence):');
+    lines.push('', 'Evidence (use get_evidence, or mw_evidence over MCP):');
     for (const e of evidence) {
       lines.push(
         `- ${e.id}: ${e.kind}${e.label ? ` "${e.label}"` : ''}${e.stepId ? ` at ${e.stepId}` : ''}`,
@@ -375,13 +396,25 @@ async function resolvePrimary(
   return primary;
 }
 
-async function applyDecisions(
-  store: Store,
+/**
+ * Apply triage decisions to a batch of findings. `decidedBy` names the model or client that
+ * judged them. Findings are re-read first, since runs may have touched them in the meantime.
+ */
+export async function applyTriageDecisions(
+  context: TriageContext,
   batch: Finding[],
-  decision: TriageDecision,
-  model: string,
-  logger: Logger,
+  rawDecision: unknown,
+  decidedBy: string,
 ): Promise<Finding[]> {
+  const { store, logger } = context;
+  const parsed = TriageDecisionSchema.safeParse(rawDecision);
+  if (!parsed.success) {
+    throw new MutationWorkflowError(
+      'INVALID_INPUT',
+      `The triage decisions are invalid:\n${z.prettifyError(parsed.error)}`,
+    );
+  }
+  const decision = parsed.data;
   const byId = new Map(batch.map((f) => [f.id, f]));
   const updated: Finding[] = [];
   const now = nowIso();
@@ -391,7 +424,6 @@ async function applyDecisions(
       logger.warn(`Triager referenced unknown finding ${entry.findingId}`);
       continue;
     }
-    // Re-read: a concurrent run may have added occurrences or runs while the agent was thinking.
     const finding = (await store.findings.get(snapshot.id)) ?? snapshot;
     const primary = await resolvePrimary(
       store,
@@ -409,7 +441,13 @@ async function applyDecisions(
       summary: entry.summary,
       severity: entry.severity,
       status,
-      triage: { state: 'done', verdict: entry.verdict, rationale: entry.rationale, model, at: now },
+      triage: {
+        state: 'done',
+        verdict: entry.verdict,
+        rationale: entry.rationale,
+        model: decidedBy,
+        at: now,
+      },
       notes: primary
         ? `${finding.notes ? `${finding.notes}\n` : ''}Duplicate of ${primary.id}.`
         : finding.notes,

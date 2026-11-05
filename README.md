@@ -46,12 +46,11 @@ remembers what it learned.
 
 ## Quick start
 
-Requirements: Node 22.13 or newer, and a model API key for the agent features (replay, mutation
-operators, oracles and reports work without one).
+Requirements: Node 22.13 or newer, and a model for the agent features: your coding agent (Claude
+Code or Codex installed, no API key), or an API key with an explicitly chosen model. Replay,
+mutation operators, oracles and reports work without any model.
 
 ```sh
-export ANTHROPIC_API_KEY=...           # or OPENAI_API_KEY for an OpenAI-compatible endpoint
-
 cd your-project
 npx mutationworkflow setup             # agents inspect the repo and write mutationworkflow.config.yaml
 npx playwright install chromium        # once, for web targets
@@ -65,6 +64,14 @@ npx mutationworkflow questions         # what the agents want you to confirm
 `mw` is a shorter alias for `mutationworkflow` once installed (`npm i -g mutationworkflow`).
 Prefer to write the config yourself? `mw init` gives you a commented template, and
 [docs/configuration.md](docs/configuration.md) documents every field.
+
+With Claude Code or Codex installed, the agent features use them automatically through your own
+subscription. With an API key instead, name the model you want:
+
+```yaml
+providers: { anthropic: { type: anthropic } }      # or openai, with any OpenAI-compatible baseUrl
+agents: { defaults: { model: claude-opus-5-5 } }   # whatever your provider offers; nothing is assumed
+```
 
 ### Try it on the examples
 
@@ -88,7 +95,7 @@ targets:
       reset: { command: "node -e \"fetch('http://127.0.0.1:4173/api/reset',{method:'POST'})\"" }
 execution: { resetBetweenRuns: true }
 EOF
-../../packages/mutationworkflow/dist/bin.js explore   # needs an API key
+../../packages/mutationworkflow/dist/bin.js explore   # needs a model: Claude Code, Codex or an API key
 ../../packages/mutationworkflow/dist/bin.js mutate
 ../../packages/mutationworkflow/dist/bin.js run
 ```
@@ -99,7 +106,9 @@ the pipeline finding all three planted bugs from two hand-written workflows.
 ## Use it from Claude Code, Codex or Cursor
 
 MutationWorkflow is also an MCP server, so your coding agent can set it up, run it and discuss
-its findings with you.
+its findings with you. Connected this way, your coding agent can also *be* the brain: it asks the
+server for a brief, inspects or explores with its own model and subscription, and submits the
+result. No API key, no second model.
 
 ```sh
 # Claude Code
@@ -120,7 +129,8 @@ args = ["-y", "mutationworkflow", "mcp"]
 
 Then ask things like *"set up MutationWorkflow for this repo"*, *"explore the checkout and run
 the mutations"*, *"show me the open findings with their reproduction steps"*, or *"is finding
-fnd_… a real bug?"*. Long operations run as jobs the agent can poll. See [docs/mcp.md](docs/mcp.md).
+fnd_… a real bug?"*. The `setup`, `explore`, `triage` and `mutate` prompts walk your agent through
+doing each role itself; long operations run as jobs it can poll. See [docs/mcp.md](docs/mcp.md).
 
 ## Running it continuously
 
@@ -132,12 +142,23 @@ fnd_… a real bug?"*. Long operations run as jobs the agent can poll. See [docs
 
 ## Models, parallelism and cost
 
-Agents default to `claude-opus-5-5`; set a different model or provider per role under
-`agents.roles`. `agents.maxParallel` caps concurrent model calls across every agent and
-sub-agent, so "use up to 3 agents at a time" is one line of config. Budgets per job
-(`maxTokensPerJob`, `maxUsdPerJob`) stop runaway sessions, and every call is recorded with its
-estimated cost. Replay never calls a model, so the expensive part (discovery and triage) happens
-only when something is new. Details in [docs/agents.md](docs/agents.md).
+MutationWorkflow has no default model. You bring one of three things:
+
+- **Your coding agent, connected over MCP.** Claude Code, Codex or Cursor asks for a brief and
+  does the inspecting, exploring, triaging or mutating itself. Whatever model you run there is the
+  model used.
+- **Your coding agent's command line, as a driver.** A provider of type `claude-code` or `codex`
+  runs each task through `claude -p` or `codex exec` with your installation and subscription;
+  MutationWorkflow serves its tools to it over MCP. Pass a model name through `agents.roles` if
+  you want one; otherwise the tool's own setting applies.
+- **A model API.** A provider of type `anthropic` or `openai` (any OpenAI-compatible endpoint)
+  with a key from the environment and a model id you name per role or in `agents.defaults`.
+
+`agents.maxParallel` caps concurrent model calls across every agent and sub-agent, so "use up to
+3 agents at a time" is one line of config. Budgets per job (`maxTokensPerJob`, `maxUsdPerJob`)
+stop runaway sessions, and every call is recorded with its estimated cost. Replay never calls a
+model, so the expensive part happens only when something is new. Details in
+[docs/agents.md](docs/agents.md).
 
 ## Safety
 

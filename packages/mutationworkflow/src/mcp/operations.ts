@@ -60,7 +60,7 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
     {
       title: 'Set up MutationWorkflow',
       description:
-        'Let the inspector agent study this repository, then write mutationworkflow.config.yaml (or a proposal next to an existing one), seed workflows and questions for the team. Needs a model provider key. Runs for minutes: returns a job id to poll with mw_job.',
+        'Let the inspector agent study this repository, then write mutationworkflow.config.yaml (or a proposal next to an existing one), seed workflows and questions for the team. Needs a model provider in the server; without one, call mw_inspect_brief and do it yourself. Runs for minutes: returns a job id to poll with mw_job.',
       inputSchema: {
         validate: z
           .boolean()
@@ -73,7 +73,7 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
       annotations: OPERATION,
     },
     safe(async (args) => {
-      requireAgents(engine, 'setup');
+      requireAgents(engine, 'setup', { role: 'inspector', clientTool: 'mw_inspect_brief' });
       return operation(
         engine,
         args.wait,
@@ -94,7 +94,7 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
     {
       title: 'Explore the app',
       description:
-        'Start the app in a local environment and let explorer agents discover new user workflows. New workflows are "pending review" with questions for the team. Needs a model provider key. Returns a job id to poll with mw_job.',
+        'Start the app in a local environment and let explorer agents discover new user workflows. New workflows are "pending review" with questions for the team. Needs a model provider in the server; without one, drive the app yourself with mw_explore_open. Returns a job id to poll with mw_job.',
       inputSchema: {
         target: z.string().optional().describe('Target id; all targets when omitted'),
         focus: z.array(z.string()).optional().describe('Areas or features to prioritise'),
@@ -104,7 +104,7 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
       annotations: OPERATION,
     },
     safe(async (args) => {
-      requireAgents(engine, 'explore');
+      requireAgents(engine, 'explore', { role: 'explorer', clientTool: 'mw_explore_open' });
       const targets = requireTargets(engine, args.target ? [args.target] : undefined);
       return operation(
         engine,
@@ -144,13 +144,23 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
         'Derive variants of the base workflows (skip, reorder, repeat, truncate, fuzz, interrupt, ...). Deterministic operators are fast and return directly; with agent=true the mutator agent adds variants in a background job.',
       inputSchema: {
         target: z.string().optional().describe('Target id; all targets when omitted'),
-        agent: z.boolean().optional().describe('Also ask the mutator agent (needs a model key)'),
+        agent: z
+          .boolean()
+          .optional()
+          .describe(
+            'Also ask the mutator agent (needs a model provider; otherwise use mw_mutation_brief)',
+          ),
         wait,
       },
       annotations: OPERATION,
     },
     safe(async (args) => {
-      if (args.agent) requireAgents(engine, 'mutate with agent');
+      if (args.agent) {
+        requireAgents(engine, 'mutate with agent', {
+          role: 'mutator',
+          clientTool: 'mw_mutation_brief',
+        });
+      }
       const targets = requireTargets(engine, args.target ? [args.target] : undefined);
       const spec: JobSpec<TargetMutateResult[]> = {
         kind: 'mutate',
@@ -230,7 +240,7 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
     {
       title: 'Triage findings',
       description:
-        'Let the triager agent review open findings that are waiting for triage, deciding bug / not-a-bug / needs-human with a rationale. Needs a model provider key. Returns a job id to poll with mw_job.',
+        'Let the triager agent review open findings that are waiting for triage, deciding bug / not-a-bug / needs-human with a rationale. Needs a model provider in the server; without one, call mw_triage_brief and judge them yourself. Returns a job id to poll with mw_job.',
       inputSchema: {
         targets: z.array(z.string()).optional().describe('Target ids; all targets when omitted'),
         includeSkipped: z
@@ -242,7 +252,7 @@ export function registerOperationTools(server: McpServer, engine: Engine): void 
       annotations: OPERATION,
     },
     safe(async (args) => {
-      requireAgents(engine, 'triage');
+      requireAgents(engine, 'triage', { role: 'triager', clientTool: 'mw_triage_brief' });
       const targetIds = requireTargets(engine, args.targets).map((t) => t.id);
       return operation(
         engine,

@@ -97,7 +97,7 @@ targets:
 agents:
   maxParallel: 3
   defaults:
-    model: claude-opus-5-5
+    model: claude-opus-5-5 # an example: required for API providers, there is no default
   roles:
     triager: { effort: low }
   budget:
@@ -114,9 +114,11 @@ oracles:
   ignoreSignals: ["favicon\\.ico"]
 ```
 
-Without a `providers` section, providers are inferred from `ANTHROPIC_API_KEY` and
-`OPENAI_API_KEY` (see [Agents](agents.md)). Without any key, every deterministic command
-(replay, mutation by operators, oracles, reports) still works.
+Without a `providers` section, providers are inferred from `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, and the `claude` and `codex` command lines on `PATH`; when more than one is
+available, `agents.defaults.provider` must name one (see [Agents](agents.md#providers)). Without
+any provider, every deterministic command (replay, mutation by operators, oracles, reports) still
+works.
 
 ## Field reference
 
@@ -127,7 +129,7 @@ Without a `providers` section, providers are inferred from `ANTHROPIC_API_KEY` a
 | `version`     | `1`    | required                     | Config format version                 |
 | `project`     | object | required                     | See below                             |
 | `targets`     | array  | `[]`                         | Applications under test               |
-| `providers`   | map    | `{}` (inferred from env)     | Model providers by id                 |
+| `providers`   | map    | `{}` (inferred, see below)   | Model providers and drivers by id     |
 | `agents`      | object | see below                    | Model settings, parallelism, budget   |
 | `mutations`   | object | see below                    | Mutation operators                    |
 | `execution`   | object | see below                    | Replay settings                       |
@@ -260,18 +262,39 @@ adapter enforces all three; the `cli` adapter has no URLs or controls and ignore
 
 ### `providers`
 
-A map from a provider id of your choice to:
+A map from a provider id of your choice (what `agents.*.provider` refers to) to one entry. There
+are four types, of two kinds: model providers call an API turn by turn with a key from the
+environment; drivers run a whole agent task through your installed coding-agent command line,
+with its own login or subscription and no API key (see [Agents](agents.md#drivers)).
 
-| Field       | Type                    | Default                                | Meaning                                                     |
-| ----------- | ----------------------- | -------------------------------------- | ----------------------------------------------------------- |
-| `type`      | `anthropic` \| `openai` | required                               | API flavour                                                 |
-| `apiKeyEnv` | string                  | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Variable holding the key                                    |
-| `baseUrl`   | string                  | provider default                       | Custom endpoint; for `openai`, any OpenAI-compatible server |
-| `pricing`   | object                  | none                                   | USD per million tokens for cost estimates and USD budgets, below |
+| `type`        | Kind           | Fields (default)                                                         | Notes                                              |
+| ------------- | -------------- | ------------------------------------------------------------------------ | -------------------------------------------------- |
+| `anthropic`   | Model provider | `apiKeyEnv` (`ANTHROPIC_API_KEY`), `baseUrl` (API default), `pricing`    | `model` required                                   |
+| `openai`      | Model provider | `apiKeyEnv` (`OPENAI_API_KEY`), `baseUrl` (API default; any OpenAI-compatible server), `pricing` | `model` required          |
+| `claude-code` | Driver         | `command` (`claude`), `args` (`[]`)                                       | `model` optional (passed as `--model`); reports usage and cost |
+| `codex`       | Driver         | `command` (`codex`), `args` (`[]`)                                        | Experimental, not tested in CI; `model` optional; no usage or cost reported |
 
-A provider whose key variable is unset is skipped with a warning.
+`command` may be a name looked up on `PATH` or a path; `args` are extra arguments placed before
+the driver's own on every invocation. A model provider whose key variable is unset, or a driver
+whose command is not on `PATH`, is skipped with a warning.
 
-`pricing` applies to every model used through that provider entry. For `anthropic` it overrides
+With no `providers` section, providers are inferred: `ANTHROPIC_API_KEY` gives `anthropic`,
+`OPENAI_API_KEY` gives `openai`, `claude` on `PATH` gives `claude-code`, `codex` on `PATH` gives
+`codex` (each with the default fields). Exactly one available provider is used automatically;
+with several, `agents.defaults.provider` or a role's `provider` must choose, or agent commands
+fail with `PROVIDER_NOT_CONFIGURED` listing them.
+
+```yaml
+providers:
+  claude: { type: claude-code } # your Claude Code login; no API key
+  api: { type: anthropic, pricing: { input: 4, output: 20 } }
+agents:
+  defaults: { provider: claude } # model optional for drivers
+  roles:
+    triager: { provider: api, model: claude-sonnet-5-5 } # model required for API providers
+```
+
+`pricing` (model providers only) applies to every model used through that provider entry. For `anthropic` it overrides
 the built-in price table; for `openai` it is the only way to get cost estimates and therefore
 `maxUsdPerJob` budgets.
 
@@ -286,7 +309,7 @@ the built-in price table; for `openai` it is the only way to get cost estimates 
 
 | Field                    | Type    | Default | Meaning                                                     |
 | ------------------------ | ------- | ------- | ----------------------------------------------------------- |
-| `maxParallel`            | integer | `3`     | Concurrent model calls across all agents and sub-agents     |
+| `maxParallel`            | integer | `3`     | Concurrent model calls across all agents and sub-agents; a driver task holds one for its whole run |
 | `defaults`               | object  | `{}`    | Model settings for every role                               |
 | `roles.<role>`           | object  | none    | Overrides for `inspector`, `explorer`, `mutator`, `triager` |
 | `budget.maxTokensPerJob` | integer | none    | Stop agents in a job after this many input + output tokens  |
@@ -296,12 +319,15 @@ Model settings (in `defaults` and each role; role values win field by field):
 
 | Field       | Type                                            | Default                                                             | Meaning                       |
 | ----------- | ----------------------------------------------- | ------------------------------------------------------------------- | ----------------------------- |
-| `provider`  | string                                          | an `anthropic` provider, else the first                             | Provider id                   |
-| `model`     | string                                          | provider default (`claude-opus-5-5` for Anthropic; none for OpenAI) | Model id                      |
-| `effort`    | `low` \| `medium` \| `high` \| `xhigh` \| `max` | none                                                                | Reasoning effort              |
+| `provider`  | string                                          | the only available provider; required when several are               | Provider id                   |
+| `model`     | string                                          | none: required for `anthropic`/`openai`; drivers use the CLI's own setting | Model id                |
+| `effort`    | `low` \| `medium` \| `high` \| `xhigh` \| `max` | none                                                                | Reasoning effort (model providers only) |
 | `maxTurns`  | integer                                         | `60`                                                                | Model calls per agent run     |
-| `maxTokens` | integer                                         | `16000`                                                             | Output tokens per call        |
+| `maxTokens` | integer                                         | `16000`                                                             | Output tokens per call (model providers only) |
 | `vision`    | boolean                                         | provider capability                                                 | Send screenshots to the model |
+
+There is no default model. A role that resolves to `anthropic` or `openai` without a `model`
+fails with `PROVIDER_NOT_CONFIGURED` naming the role; model ids in these docs are examples.
 
 ### `mutations`
 

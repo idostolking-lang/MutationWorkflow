@@ -1,4 +1,4 @@
-import type { ModelProvider } from '../agents/provider.js';
+import type { Provider } from '../agents/provider.js';
 import { createProviders } from '../agents/providers/index.js';
 import { type AgentEvent, AgentRuntime } from '../agents/runtime.js';
 import { loadConfig, type ResolvedConfig } from '../config/load.js';
@@ -29,12 +29,39 @@ import type { RunStats, Store, UsageTotals } from '../store/types.js';
 import { errorMessage, MutationWorkflowError } from '../util/errors.js';
 import { createLogger, type Logger } from '../util/logger.js';
 import { type AdapterLoader, AdapterRegistry } from './adapters.js';
-import { type ExploreOptions, type ExploreResult, explore } from './explore.js';
+import {
+  ExplorationSession,
+  type ExploreOptions,
+  type ExploreResult,
+  explore,
+  explorerInstructions,
+} from './explore.js';
 import { JobManager } from './jobs.js';
-import { type MutateOptions, type MutateResult, mutate } from './mutate.js';
+import {
+  applyAgentVariants,
+  type MutateOptions,
+  type MutateResult,
+  type MutationBrief,
+  mutate,
+  mutationBrief,
+} from './mutate.js';
 import { type RunOptions, type RunSummary, runWorkflows } from './run.js';
-import { type SetupOptions, type SetupResult, setup } from './setup.js';
-import { triageFindings } from './triage.js';
+import {
+  applyInspectionReport,
+  type InspectionBrief,
+  inspectionBrief,
+  type SetupContext,
+  type SetupOptions,
+  type SetupResult,
+  setup,
+} from './setup.js';
+import {
+  applyTriageDecisions,
+  TRIAGE_BATCH_SIZE,
+  type TriageBrief,
+  triageBrief,
+  triageFindings,
+} from './triage.js';
 
 export interface EngineOptions {
   config: ResolvedConfig;
@@ -42,7 +69,7 @@ export interface EngineOptions {
   /** Adapter loaders by kind or package name; the CLI registers the built-in web and cli adapters. */
   adapters?: Record<string, AdapterLoader>;
   /** Override the providers built from the config (tests use a fake provider). */
-  providers?: Map<string, ModelProvider>;
+  providers?: Map<string, Provider>;
   env?: NodeJS.ProcessEnv;
   store?: Store;
   oracles?: Oracle[];
@@ -72,6 +99,7 @@ export interface StatusSummary {
     enabled: boolean;
     providers: string[];
     maxParallel: number;
+    /** Model per role, or the driver's own default when the role runs through a coding agent. */
     models: Partial<Record<AgentRole, string>>;
     /** Roles that cannot run with the current configuration, with the reason. */
     problems: string[];
@@ -93,11 +121,28 @@ export interface AnswerResult {
   finding?: Finding;
 }
 
+/**
+ * A live exploration driven from outside the engine: a coding agent connected over MCP calls the
+ * session's tools one at a time and closes the handle when done. The environment the session
+ * runs against stays up until then.
+ */
+export interface ExplorationHandle {
+  id: string;
+  targetId: string;
+  instructions: { system: string; task: string };
+  session: ExplorationSession;
+  openedAt: string;
+  close(): Promise<{ workflows: Workflow[]; questions: Question[] }>;
+}
+
 const ROLES: AgentRole[] = ['inspector', 'explorer', 'mutator', 'triager'];
 
 /**
  * The engine wires configuration, memory, adapters, environments and agents together and
- * exposes every operation the CLI and the MCP server offer. One instance per project.
+ * exposes every operation the CLI and the MCP server offer. One instance per project. Agent
+ * roles can be run three ways: by the in-process runtime against a model API, by a coding
+ * agent's command line through a driver, or by a coding agent connected over MCP that asks for a
+ * brief, does the thinking itself, and submits the result.
  */
 export class Engine {
   readonly rootDir: string;
@@ -145,12 +190,14 @@ export class Engine {
     await store.init();
     for (const target of config.targets) await store.targets.upsert(redactTarget(target));
     const registry = new AdapterRegistry({ rootDir, logger });
-    for (const [name, loader] of Object.entries(options.adapters ?? {}))
+    for (const [name, loader] of Object.entries(options.adapters ?? {})) {
       registry.register(name, loader);
+    }
     const jobs = new JobManager(store, logger);
     const recovered = await jobs.recover();
-    if (recovered > 0)
+    if (recovered > 0) {
       logger.warn(`Marked ${recovered} interrupted job(s) from a previous process as failed`);
+    }
     return new Engine(options, options.config, {
       store,
       registry,
@@ -197,8 +244,9 @@ export class Engine {
     this.currentReportsDir = resolved.resolvePath(resolved.config.reportsDir);
     this.currentOracles = this.options.oracles ?? resolveOracles(resolved.config.oracles.enabled);
     this.currentAgents = this.buildAgents(resolved.config);
-    for (const target of resolved.config.targets)
+    for (const target of resolved.config.targets) {
       await this.store.targets.upsert(redactTarget(target));
+    }
     this.logger.info(`Configuration reloaded from ${resolved.path}`);
   }
 
@@ -263,7 +311,8 @@ export class Engine {
     if (this.agents.enabled) {
       for (const role of ROLES) {
         try {
-          models[role] = this.agents.resolveModel(role).model;
+          const resolved = this.agents.resolveModel(role);
+          models[role] = resolved.model ?? `${resolved.provider.id} (its own default)`;
         } catch (error) {
           problems.push(`${role}: ${errorMessage(error)}`);
         }
@@ -288,6 +337,9 @@ export class Engine {
     };
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // Agent-driven operations: in-process runtime or coding-agent driver.
+
   /**
    * Inspect the repository with agents and write the configuration and seed workflows. When a
    * config is created, the engine reloads it so the new targets are usable right away.
@@ -296,19 +348,7 @@ export class Engine {
     this.requireAgents('setup', 'inspector');
     const { jobId, signal, onEvent, ...rest } = options;
     const result = await setup(
-      {
-        store: this.store,
-        runtime: this.agents,
-        registry: this.registry,
-        environments: this.environments,
-        rootDir: this.rootDir,
-        configPath: this.configPath,
-        existing: this.configPath ? this.config : undefined,
-        logger: this.logger,
-        jobId,
-        signal,
-        onEvent,
-      },
+      { ...this.setupContext(), runtime: this.agents, jobId, signal, onEvent },
       rest,
     );
     if (result.configAction === 'created') await this.reloadConfig();
@@ -393,22 +433,7 @@ export class Engine {
     this.requireAgents('triage', 'triager');
     const updated: Finding[] = [];
     for (const target of this.targets(options.targetIds)) {
-      const pending = await this.store.findings.list({
-        targetId: target.id,
-        status: 'open',
-        triageState: 'pending',
-      });
-      const skipped = options.includeSkipped
-        ? await this.store.findings.list({
-            targetId: target.id,
-            status: 'open',
-            triageState: 'skipped',
-          })
-        : [];
-      const candidates = [
-        ...pending,
-        ...skipped.map((f) => FindingSchema.parse({ ...f, triage: { state: 'pending' } })),
-      ];
+      const candidates = await this.triageCandidates(target.id, options.includeSkipped ?? false);
       if (candidates.length === 0) continue;
       updated.push(
         ...(await triageFindings(
@@ -478,6 +503,163 @@ export class Engine {
     }
     return { cycles: cycle };
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // Client-driven operations: a coding agent connected over MCP does the thinking itself.
+
+  /** The inspector's instructions and report schema, for a client that inspects the repo itself. */
+  inspectionBrief(options: SetupOptions = {}): Promise<InspectionBrief> {
+    return inspectionBrief(this.setupContext(), options);
+  }
+
+  /** Apply a report produced by a client; creates the config (and reloads it) or a proposal. */
+  async applyInspectionReport(report: unknown, options: SetupOptions = {}): Promise<SetupResult> {
+    const result = await applyInspectionReport(this.setupContext(), report, options);
+    if (result.configAction === 'created') await this.reloadConfig();
+    return result;
+  }
+
+  /**
+   * Start an exploration a client drives itself: the environment comes up, a session opens, and
+   * the handle exposes the session's tools together with the explorer's instructions.
+   */
+  async openExploration(
+    targetId: string,
+    options: { focus?: string[]; maxWorkflows?: number; vision?: boolean } = {},
+  ): Promise<ExplorationHandle> {
+    const target = this.target(targetId);
+    const adapter = await this.registry.forTarget(target);
+    const env = await this.environments.start(target);
+    const known = await this.store.workflows.list({
+      targetId: target.id,
+      parentId: null,
+      status: ['active', 'pending-review'],
+    });
+    const maxWorkflows = options.maxWorkflows ?? this.config.exploration.maxWorkflows;
+    const deps = {
+      store: this.store,
+      config: this.config,
+      target,
+      adapter,
+      evidenceRoot: this.evidenceRoot,
+      logger: this.logger,
+    };
+    const session = new ExplorationSession(deps, {
+      vision: options.vision ?? true,
+      shared: { titles: new Set(known.map((w) => w.title)), saved: 0, budget: maxWorkflows },
+    });
+    try {
+      await session.open();
+    } catch (error) {
+      await env.stop();
+      throw error;
+    }
+    const assignment =
+      options.focus && options.focus.length > 0
+        ? options.focus.join('; ')
+        : 'the main user journeys first, then edge cases and recovery paths';
+    const instructions = explorerInstructions(deps, {
+      assignment,
+      maxWorkflows,
+      knownTitles: known.map((w) => w.title),
+      baseUrl: env.baseUrl,
+    });
+    let closed: Promise<{ workflows: Workflow[]; questions: Question[] }> | undefined;
+    return {
+      id: session.id,
+      targetId: target.id,
+      instructions,
+      session,
+      openedAt: nowIso(),
+      close: () => {
+        closed ??= (async () => {
+          await session.close();
+          await env.stop();
+          return { workflows: session.saved, questions: session.questions };
+        })();
+        return closed;
+      },
+    };
+  }
+
+  /**
+   * Pending findings of one target with the triager's instructions, for a client that judges
+   * them itself. Returns undefined when nothing is waiting.
+   */
+  async triageBrief(
+    options: { targetId?: string; includeSkipped?: boolean; limit?: number } = {},
+  ): Promise<(TriageBrief & { targetId: string }) | undefined> {
+    const targets = options.targetId ? [this.target(options.targetId)] : this.config.targets;
+    for (const target of targets) {
+      const candidates = await this.triageCandidates(target.id, options.includeSkipped ?? false);
+      if (candidates.length === 0) continue;
+      const batch = candidates.slice(0, options.limit ?? TRIAGE_BATCH_SIZE);
+      const brief = await triageBrief({ store: this.store, target, logger: this.logger }, batch);
+      return { ...brief, targetId: target.id };
+    }
+    return undefined;
+  }
+
+  /** Apply triage decisions a client made; the findings are looked up by the ids it names. */
+  async applyTriageDecisions(decision: unknown, decidedBy = 'client'): Promise<Finding[]> {
+    const ids = extractFindingIds(decision);
+    const batch: Finding[] = [];
+    for (const id of ids) {
+      const finding = await this.store.findings.get(id);
+      if (finding) batch.push(finding);
+    }
+    if (batch.length === 0) {
+      throw new MutationWorkflowError(
+        'NOT_FOUND',
+        'None of the decisions name an existing finding',
+      );
+    }
+    const byTarget = new Map<string, Finding[]>();
+    for (const finding of batch) {
+      const list = byTarget.get(finding.targetId) ?? [];
+      list.push(finding);
+      byTarget.set(finding.targetId, list);
+    }
+    const updated: Finding[] = [];
+    for (const [targetId, findings] of byTarget) {
+      updated.push(
+        ...(await applyTriageDecisions(
+          { store: this.store, target: this.target(targetId), logger: this.logger },
+          findings,
+          decision,
+          decidedBy,
+        )),
+      );
+    }
+    return updated;
+  }
+
+  /** The mutator's instructions for one base workflow, for a client that proposes variants itself. */
+  async mutationBrief(workflowId: string): Promise<MutationBrief & { workflowId: string }> {
+    const workflow = await this.workflow(workflowId);
+    const target = this.target(workflow.targetId);
+    const adapter = await this.registry.forTarget(target);
+    const brief = await mutationBrief(
+      { store: this.store, target, adapter, logger: this.logger },
+      workflow,
+    );
+    return { ...brief, workflowId };
+  }
+
+  /** Store variants a client proposed for a base workflow. */
+  async applyAgentVariants(workflowId: string, variants: unknown): Promise<Workflow[]> {
+    const workflow = await this.workflow(workflowId);
+    const target = this.target(workflow.targetId);
+    const adapter = await this.registry.forTarget(target);
+    return applyAgentVariants(
+      { store: this.store, target, adapter, logger: this.logger },
+      workflow,
+      variants,
+    );
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Memory operations.
 
   /**
    * Record the team's answer to a question. For a question about observed behaviour: confirm
@@ -603,6 +785,42 @@ export class Engine {
     await this.store.close();
   }
 
+  // ---------------------------------------------------------------------------------------------
+
+  private async workflow(id: string): Promise<Workflow> {
+    const workflow = await this.store.workflows.get(id);
+    if (!workflow)
+      throw new MutationWorkflowError('WORKFLOW_NOT_FOUND', `No workflow with id ${id}`);
+    return workflow;
+  }
+
+  private async triageCandidates(targetId: string, includeSkipped: boolean): Promise<Finding[]> {
+    const pending = await this.store.findings.list({
+      targetId,
+      status: 'open',
+      triageState: 'pending',
+    });
+    const skipped = includeSkipped
+      ? await this.store.findings.list({ targetId, status: 'open', triageState: 'skipped' })
+      : [];
+    return [
+      ...pending,
+      ...skipped.map((f) => FindingSchema.parse({ ...f, triage: { state: 'pending' } })),
+    ];
+  }
+
+  private setupContext(): SetupContext {
+    return {
+      store: this.store,
+      registry: this.registry,
+      environments: this.environments,
+      rootDir: this.rootDir,
+      configPath: this.configPath,
+      existing: this.configPath ? this.config : undefined,
+      logger: this.logger,
+    };
+  }
+
   /** Change a workflow's status and propagate it to its mutation variants. */
   private async setWorkflowStatus(
     workflow: Workflow,
@@ -653,11 +871,25 @@ export class Engine {
     if (!this.agents.enabled) {
       throw new MutationWorkflowError(
         'PROVIDER_NOT_CONFIGURED',
-        `"${action}" needs a model provider. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add a providers section to the config.`,
+        `"${action}" needs a model provider. Install Claude Code or Codex, set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add a providers section to the config. A coding agent connected over MCP can also do this itself through the brief tools.`,
       );
     }
     this.agents.resolveModel(role);
   }
+}
+
+/** Finding ids named in a decision document, before full validation. */
+function extractFindingIds(decision: unknown): string[] {
+  if (!decision || typeof decision !== 'object') return [];
+  const list = (decision as { decisions?: unknown }).decisions;
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((entry) =>
+    entry &&
+    typeof entry === 'object' &&
+    typeof (entry as { findingId?: unknown }).findingId === 'string'
+      ? [(entry as { findingId: string }).findingId]
+      : [],
+  );
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
