@@ -28,4 +28,4 @@ No confidence scores. Instead:
 - Findings have one severity and one verdict, both explained in words.
 - Without a model provider, findings keep their mechanical titles and are marked `skipped` for
   triage; the deterministic pipeline still works.
-- Quality depends on the triager model; the default is the strongest generally available model.
+- Quality depends on the triager model, which the user chooses (see 0009: there is no default).

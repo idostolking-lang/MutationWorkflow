@@ -13,9 +13,11 @@ All notable changes to this project are documented here. The format follows
   Markdown reports.
 - Nine mutation operators: skip, reorder, repeat, truncate, data fuzz, interrupt, timing, role
   swap and interleave, plus optional agent-proposed mutations.
-- Agent runtime with Anthropic and OpenAI-compatible providers, parallel fan-out under a
-  configurable cap, per-job budgets and usage accounting; inspector, explorer, mutator and
-  triager roles.
+- Agent runtime with inspector, explorer, mutator and triager roles, parallel fan-out under a
+  configurable cap, per-job budgets and usage accounting. No default model: roles run through
+  the coding agent connected over MCP (brief and apply tools, no API key), through a
+  coding-agent command line as a driver (`claude-code`, `codex`), or through a model API
+  (`anthropic`, `openai`) with an explicitly chosen model.
 - Playwright web adapter and process-based CLI adapter, each with an example application that
   plants sequence bugs.
 - `mw` command-line interface and MCP server for Claude Code, Codex and Cursor.

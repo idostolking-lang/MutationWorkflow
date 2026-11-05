@@ -130,7 +130,7 @@ Triage is the review of automatically detected findings.
 | -------------- | -------------------------------------------------------------- |
 | `pending`      | Waiting for the triager agent (or a human)                     |
 | `done`         | Carries `verdict`, `rationale`, `model` and `at`               |
-| `skipped`      | No model provider was configured when the finding was created  |
+| `skipped`      | No provider could run the triager when the finding was created |
 
 After each `run`, the findings it created or updated that are still `pending` are triaged per
 target, in batches of 8. The triager receives a dossier per finding: detector, severity guess,
@@ -159,9 +159,12 @@ Findings the triager leaves out stay `pending`. If the agent fails, runs out of 
 model call errors (rate limits, network), the batch stays `pending`, the run carries on, and the
 failure is listed in the run's `errors`.
 
-Without a model provider, or without a model for the `triager` role, pending findings from a run
-are marked `skipped` so they do not look stuck. Once a provider is configured, `mw triage --include-skipped` ([CLI](cli.md)) revisits them
-along with pending ones; only `open` findings are considered.
+When the `triager` role cannot run (no provider or driver available, several available but none
+chosen, or an API provider without a `model`; see [Agents](agents.md#providers)), pending findings
+from a run are marked `skipped` so they do not look stuck. Once that is fixed,
+`mw triage --include-skipped` ([CLI](cli.md)) revisits them along with pending ones; only `open`
+findings are considered. A coding agent connected over MCP can also triage them with its own
+model (`triageBrief` and `applyTriageDecisions`, see [MCP](mcp.md)).
 
 The triager's rules of thumb: a crash, unhandled exception, server error or corrupted state is
 always a bug, however unusual the sequence; a failed expectation on a mutation is a bug only when

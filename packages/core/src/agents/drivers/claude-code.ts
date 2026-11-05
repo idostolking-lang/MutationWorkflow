@@ -27,9 +27,9 @@ interface ClaudeJsonResult {
 
 /**
  * Runs each agent task through the Claude Code command line in print mode, using the user's own
- * Claude Code login or subscription. MutationWorkflow's tools reach it over MCP; built-in tools
- * are switched off except for the inspector, which keeps read-only access to the repository and
- * is better served by Claude Code's own file tools than by ours.
+ * Claude Code login or subscription. MutationWorkflow's tools reach it over MCP; Claude Code's
+ * built-in tools are switched off so the task only touches what the scope and the credential
+ * filters allow.
  */
 export class ClaudeCodeDriver extends CliAgentDriver {
   readonly type = 'claude-code';
@@ -53,11 +53,9 @@ export class ClaudeCodeDriver extends CliAgentDriver {
       'mcp__mw',
       '--no-session-persistence',
     ];
-    if (request.role === 'inspector') {
-      args.push('--restricted');
-    } else {
-      args.push('--tools', '');
-    }
+    // Built-in tools stay off for every role: MutationWorkflow's own tools hide credential files
+    // and respect the target scope, which Claude Code's file tools would not.
+    args.push('--tools', '');
     if (request.model) args.push('--model', request.model);
     return { args };
   }

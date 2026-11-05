@@ -76,7 +76,7 @@ describe('coding-agent drivers', () => {
     expect(summary.argv).not.toContain('--restricted');
   });
 
-  it('keeps read-only built-in tools for the inspector and passes no model when none is set', async () => {
+  it('switches built-in tools off for the inspector too and passes no model when none is set', async () => {
     const driver = new ClaudeCodeDriver({
       id: 'claude-code',
       command: process.execPath,
@@ -89,8 +89,8 @@ describe('coding-agent drivers', () => {
       tools: [],
     });
     const summary = JSON.parse(result.text) as { argv: string[]; model: string | null };
-    expect(summary.argv).toContain('--restricted');
-    expect(summary.argv).not.toContain('--tools');
+    expect(summary.argv).not.toContain('--restricted');
+    expect(summary.argv).toContain('--tools');
     expect(summary.model).toBeNull();
   });
 

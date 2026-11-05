@@ -39,7 +39,9 @@ effects even if the UI offers them, stay in scope and treat a refusal as informa
   `credentials*`, `secrets*`, `.npmrc`, `.netrc` and `.aws`/`.azure`/`.gcloud` files, whatever the
   repository's `.gitignore` says. They never follow symbolic links and refuse any path that
   resolves outside the project. Generated and vendored directories (`node_modules` and the like)
-  are skipped, and file and listing sizes are capped.
+  are skipped, and file and listing sizes are capped. These rules belong to MutationWorkflow's
+  tools: with the `claude-code` driver the inspector also keeps Claude Code's own read-only file
+  tools (`--restricted`), which follow Claude Code's permission settings instead.
 - **Old screenshots.** Only the two most recent images stay in an agent's conversation; older
   ones are replaced by the placeholder `[earlier screenshot omitted to save context]`, which keeps
   long explorations within provider image limits and cost.

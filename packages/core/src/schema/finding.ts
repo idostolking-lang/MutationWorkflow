@@ -11,7 +11,8 @@ export type TriageVerdict = z.infer<typeof TriageVerdictSchema>;
 /**
  * Triage is the review of an automatically detected problem. `pending` findings await a
  * triager agent (or a human); `done` findings carry its verdict; `skipped` findings could not
- * be reviewed because no model provider was configured (`triage --include-skipped` revisits them).
+ * be reviewed because no provider could run the triager when they were created
+ * (`triage --include-skipped` revisits them).
  */
 export const TriageSchema = z.object({
   state: z.enum(['pending', 'done', 'skipped']),
