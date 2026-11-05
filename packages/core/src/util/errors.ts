@@ -9,6 +9,7 @@ export type ErrorCode =
   | 'BUDGET_EXCEEDED'
   | 'AGENT_FAILED'
   | 'INVALID_INPUT'
+  | 'GIT_UNAVAILABLE'
   | 'NOT_FOUND';
 
 /** Error with a stable code so callers (CLI, MCP) can map it to a message without parsing text. */

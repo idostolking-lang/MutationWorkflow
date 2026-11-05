@@ -1,5 +1,5 @@
 import type { Action, Assertion } from '../schema/action.js';
-import type { Evidence, Signal } from '../schema/run.js';
+import type { Evidence, Footprint, Signal } from '../schema/run.js';
 import type { Scope, TargetConfig } from '../schema/target.js';
 import type { Logger } from '../util/logger.js';
 import type { EvidenceSink } from './evidence.js';
@@ -95,6 +95,11 @@ export interface AdapterSession {
   /** Error signals collected since the previous call. */
   drainSignals(): Signal[];
   capture(kind: 'screenshot' | 'dom' | 'output', label?: string): Promise<Evidence | undefined>;
+  /**
+   * What the session touched so far: in-scope pages visited and endpoints or commands used.
+   * Optional; adapters that cannot tell report nothing and the workflow is treated as unknown.
+   */
+  footprint?(): Footprint;
   close(): Promise<void>;
 }
 

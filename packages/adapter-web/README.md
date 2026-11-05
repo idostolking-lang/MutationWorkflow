@@ -139,3 +139,13 @@ application state; they return `{ passed, message }`.
 Screenshots follow the session's `screenshots` setting (`always`, `on-failure`, `never`); every
 non-`ok` outcome also carries the recent console output. `observe()` returns the page's ARIA
 snapshot, and `capture()` saves a screenshot, the DOM (`.html`) or the console output.
+
+## Footprint
+
+`WebSession.footprint()` reports what the session touched, cumulatively, so the engine can tell
+which workflows exercise code changed by a push. `urls` lists the in-scope pages the main frame
+visited (navigate, link clicks, reload, back/forward, history API) as paths without host, query
+or hash. `endpoints` lists in-scope backend requests as `"<METHOD> <path>"`: every request whose
+method is not GET (fetch, XHR or form POST), plus GETs made with fetch or XHR. Document loads,
+static assets (scripts, styles, images, fonts, media) and out-of-scope or scope-blocked requests
+are left out. Both lists are unique, in first-seen order, and capped at 200 entries.

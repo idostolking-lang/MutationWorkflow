@@ -12,6 +12,7 @@ import {
 } from '@mutationworkflow/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type CliAdapter, createAdapter } from './adapter.js';
+import { commandWord } from './session.js';
 
 const COUNTER_DIR = resolve(fileURLToPath(import.meta.url), '../../../../examples/counter-cli');
 
@@ -108,6 +109,20 @@ describe('CliSession with examples/counter-cli', () => {
     expect(log?.kind).toBe('log');
     expect(readFileSync(join(evidenceDir, log?.path ?? ''), 'utf8')).toContain('add 5');
     expect(await session.capture('screenshot')).toBeUndefined();
+  });
+
+  it('reports the command words used as its footprint', async () => {
+    expect(session.footprint?.()).toEqual({ urls: [], endpoints: [] });
+    await steps([
+      { type: 'start' },
+      { type: 'wait', prompt: true },
+      ...enter('add 5'),
+      ...enter('  UNDO  '),
+      ...enter('add 1'),
+      { type: 'close' },
+      { type: 'exec', args: ['sub', '2'] },
+    ]);
+    expect(session.footprint?.()).toEqual({ urls: [], endpoints: ['add', 'undo', 'sub'] });
   });
 
   it('reports the reset → undo crash as signals', async () => {
@@ -242,5 +257,16 @@ describe('CliSession with examples/counter-cli', () => {
     expect(selfKilling.drainSignals()).toMatchObject([
       { kind: 'crash', message: 'Process was terminated by SIGABRT', stepId: 's2' },
     ]);
+  });
+});
+
+describe('commandWord', () => {
+  it('takes the first word of written text, the first exec argument or the command', () => {
+    expect(commandWord({ type: 'write', text: ' Add 5\n', newline: true }, 'node')).toBe('add');
+    expect(commandWord({ type: 'write', text: '   ', newline: true }, 'node')).toBeUndefined();
+    expect(commandWord({ type: 'exec', args: ['sub', '2'] }, 'node')).toBe('sub');
+    expect(commandWord({ type: 'exec', args: [] }, '/usr/bin/counter')).toBe('counter');
+    expect(commandWord({ type: 'exec' }, './bin/app')).toBe('app');
+    expect(commandWord({ type: 'close' }, 'node')).toBeUndefined();
   });
 });

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -401,6 +401,82 @@ describe('Engine', () => {
       'assertions',
       'invariants',
     ]);
+  });
+
+  it('learns what workflows touch and replays only what a change affects', async () => {
+    writeFileSync(join(dir, 'server.js'), "app.post('/api/items', add);\n");
+    writeFileSync(join(dir, 'README.md'), '# app\n');
+    const engine = await createEngine({
+      targets: [
+        {
+          id: 'app',
+          kind: 'fake',
+          codemap: [{ match: '/api/items/**', files: ['src/items/**'] }],
+        },
+      ],
+    });
+    const base = await seedBase(engine);
+    const first = await engine.run({ trigger: 'manual', report: false });
+    expect(first.runs[0]?.touched).toEqual({ urls: ['/'], endpoints: ['POST /api/items'] });
+    expect(first.selection).toBeUndefined();
+
+    const learned = await engine.store.workflows.get(base.id);
+    expect(learned?.touches?.urls).toEqual(['/']);
+    expect(learned?.touches?.endpoints).toEqual(['POST /api/items']);
+    expect(learned?.touches?.files).toEqual(['server.js', 'src/items/**']);
+
+    const backend = await engine.impact({ files: ['server.js'] });
+    expect(backend.targets[0]?.impacted.map((w) => w.id)).toEqual([base.id]);
+    const docs = await engine.impact({ files: ['./README.md'] });
+    expect(docs.changedFiles).toEqual(['README.md']);
+    expect(docs.targets[0]?.unaffected.map((w) => w.id)).toEqual([base.id]);
+    expect((await engine.impact({ files: ['package.json'] })).targets[0]?.sharedChange).toBe(true);
+    await expect(engine.impact({ range: 'HEAD~1..HEAD' })).rejects.toThrow(/git repository/);
+
+    // A workflow that never ran is unknown and replays on any change; the known one is skipped.
+    const other = createWorkflow(
+      'app',
+      { title: 'Open the app', intent: 'Look around', steps: [{ action: { type: 'go' } }] },
+      { origin: 'seed' },
+    );
+    await engine.store.workflows.insert(other);
+    const docsRun = await engine.run({
+      trigger: 'push',
+      report: false,
+      changed: { files: ['README.md'] },
+    });
+    expect(docsRun.runs.map((r) => r.workflowId)).toEqual([other.id]);
+    expect(docsRun.selection).toEqual([
+      { targetId: 'app', changedFiles: 1, impacted: 0, unknown: 1, skipped: 1, everything: false },
+    ]);
+
+    // A backend change replays the impacted base with its variants; the "go only" workflow has
+    // no file knowledge (the root page maps to nothing) and keeps running as unknown.
+    await engine.mutate('app');
+    const backendRun = await engine.run({
+      trigger: 'push',
+      changed: { files: ['server.js'] },
+    });
+    const replayed = new Set(backendRun.runs.map((r) => r.workflowId));
+    expect(replayed.has(base.id)).toBe(true);
+    expect(replayed.has(other.id)).toBe(true);
+    expect(backendRun.runs.some((r) => r.context.mutated)).toBe(true);
+    // Nothing is known to be unaffected, so the run counts as a full one.
+    expect(backendRun.selection?.[0]).toMatchObject({
+      impacted: 1,
+      unknown: 1,
+      skipped: 0,
+      everything: true,
+    });
+    const report = readFileSync(backendRun.reportPath ?? '', 'utf8');
+    expect(report).toContain('1 changed file; every workflow was replayed.');
+    expect(report).toContain('Endpoints: `/api/items (POST)`');
+
+    // Without git history the change cannot be determined: everything runs and the summary says so.
+    const fallback = await engine.run({ trigger: 'push', report: false, changed: {} });
+    expect(fallback.errors[0]).toMatch(/Replaying every workflow instead/);
+    expect(fallback.selection).toBeUndefined();
+    expect(fallback.runs.length).toBeGreaterThan(2);
   });
 
   it('runs continuous cycles until the cycle limit', async () => {

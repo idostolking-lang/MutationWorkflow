@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { ActionSchema, AssertionSchema } from './action.js';
 import { fingerprint, IsoDateTimeSchema, newId, nowIso } from './common.js';
+import { FootprintSchema } from './run.js';
 
 /** A single user action inside a workflow, with the expectations checked right after it. */
 export const StepSchema = z.object({
@@ -49,6 +50,16 @@ export const WorkflowSourceSchema = z.object({
 });
 export type WorkflowSource = z.infer<typeof WorkflowSourceSchema>;
 
+/** Accumulated knowledge of what a workflow exercises, learned from its runs and the code map. */
+export const WorkflowTouchesSchema = FootprintSchema.extend({
+  files: z
+    .array(z.string())
+    .default([])
+    .describe('Source files or globs the workflow exercises, derived from endpoints and pages'),
+  updatedAt: IsoDateTimeSchema,
+});
+export type WorkflowTouches = z.infer<typeof WorkflowTouchesSchema>;
+
 /**
  * A workflow is an ordered sequence of user actions with an intent. It is fully serialisable
  * and replays deterministically through an adapter, without a model in the loop.
@@ -70,6 +81,7 @@ export const WorkflowSchema = z.object({
     .describe('Assertions about the final state, checked after the last step'),
   tags: z.array(z.string()).default([]),
   source: WorkflowSourceSchema.optional(),
+  touches: WorkflowTouchesSchema.optional(),
   fingerprint: z.string().min(1),
   createdAt: IsoDateTimeSchema,
   updatedAt: IsoDateTimeSchema,

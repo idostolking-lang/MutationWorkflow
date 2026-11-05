@@ -8,6 +8,7 @@ import {
   type AssertionResult,
   type AssertionScope,
   type Evidence,
+  type Footprint,
   newId,
   nowIso,
   type Run,
@@ -67,6 +68,7 @@ export async function executeWorkflow(options: ExecuteOptions): Promise<Executio
   const steps: StepResult[] = [];
   const assertions: AssertionResult[] = [];
   let signals: Signal[] = [];
+  let footprint: Footprint | undefined;
   let runError: string | undefined;
   let session: AdapterSession | undefined;
 
@@ -110,6 +112,7 @@ export async function executeWorkflow(options: ExecuteOptions): Promise<Executio
     }
     await checkInvariants(session, target, 'after-workflow', undefined, assertions, remaining);
     signals = session.drainSignals();
+    footprint = session.footprint?.();
 
     const troubled =
       steps.some((s) => s.status !== 'passed' && s.status !== 'skipped') ||
@@ -129,8 +132,9 @@ export async function executeWorkflow(options: ExecuteOptions): Promise<Executio
     logger.error(`Run ${runId} failed: ${runError}`);
     try {
       signals = session?.drainSignals() ?? [];
+      footprint = session?.footprint?.();
     } catch {
-      // The session is already broken; signals are a bonus here.
+      // The session is already broken; signals and the footprint are a bonus here.
     }
   } finally {
     if (session) {
@@ -168,6 +172,7 @@ export async function executeWorkflow(options: ExecuteOptions): Promise<Executio
     oracles,
     evidenceIds: sink.all.map((e) => e.id),
     context: { ...options.context, mutated },
+    touched: footprint,
     error: runError,
   });
   return { run, evidence: [...sink.all] };

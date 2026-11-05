@@ -1,3 +1,4 @@
+import { basename } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   type Action,
@@ -7,6 +8,7 @@ import {
   type CheckOutcome,
   type Evidence,
   errorMessage,
+  type Footprint,
   type Observation,
   type SessionOptions,
   type Signal,
@@ -28,6 +30,8 @@ type WaitResult = 'met' | 'exited' | 'timeout';
 const OBSERVATION_CHARS = 4_000;
 const EVIDENCE_CHARS = 4_000;
 const CLOSE_KILL_TIMEOUT_MS = 2_000;
+/** Most distinct command words a session's footprint keeps. */
+const FOOTPRINT_MAX_ENTRIES = 200;
 /** Exit codes shells use for "terminated by signal n" (128 + n). */
 const SIGNAL_EXIT_CODES: Record<string, number> = { SIGINT: 130, SIGKILL: 137, SIGTERM: 143 };
 
@@ -49,6 +53,8 @@ export class CliSession implements AdapterSession {
   private stepStart: OutputOffsets = START_OFFSETS;
   /** Output position when input was last sent; `wait` looks at what came after it. */
   private inputStart: OutputOffsets = START_OFFSETS;
+  /** Command words the workflow used, unique, in first-seen order. */
+  private readonly commands = new Set<string>();
 
   constructor(
     private readonly options: ResolvedCliOptions,
@@ -71,13 +77,25 @@ export class CliSession implements AdapterSession {
     );
     let result: Result;
     try {
-      result = await this.run(parseByType(CliActionSchemas, 'action', action));
+      const parsed = parseByType(CliActionSchemas, 'action', action);
+      this.recordCommand(parsed);
+      result = await this.run(parsed);
     } catch (error) {
       result = { status: 'error', message: errorMessage(error) };
     }
     if (result.status === 'ok') return { ...result, evidence: [] };
     this.session.logger.debug('Action not performed', { action, ...result });
     return { ...result, evidence: this.outputEvidence() };
+  }
+
+  /** What the session touched: no pages, and the command words used as endpoints. */
+  footprint(): Footprint {
+    return { urls: [], endpoints: [...this.commands] };
+  }
+
+  private recordCommand(action: CliAction): void {
+    const word = commandWord(action, this.options.command);
+    if (word !== undefined && this.commands.size < FOOTPRINT_MAX_ENTRIES) this.commands.add(word);
   }
 
   private async run(action: CliAction): Promise<Result> {
@@ -399,4 +417,20 @@ export class CliSession implements AdapterSession {
     }
     this.onClose();
   }
+}
+
+/**
+ * The command word an action uses: the first token of the text for `write` (lowercased), the
+ * first extra argument for `exec`, or else the configured command's basename.
+ */
+export function commandWord(action: CliAction, command: string): string | undefined {
+  if (action.type === 'write') {
+    const word = action.text.trim().split(/\s+/)[0]?.toLowerCase();
+    return word ? word : undefined;
+  }
+  if (action.type === 'exec') {
+    const first = action.args?.[0]?.trim();
+    return first ? first : basename(command) || undefined;
+  }
+  return undefined;
 }

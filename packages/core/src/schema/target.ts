@@ -78,6 +78,19 @@ export const ScopeSchema = z.object({
 });
 export type Scope = z.infer<typeof ScopeSchema>;
 
+/**
+ * Ties what a workflow touches to the code that implements it. Patterns are globs matched against
+ * normalised endpoints ("POST /api/todos/*") and page paths ("/settings"); files are paths or
+ * globs relative to the project root. The inspector proposes these; the engine also derives
+ * files by searching the repository for the literal paths.
+ */
+export const CodeMapRuleSchema = z.object({
+  match: z.string().min(1).describe('Glob over endpoint ("POST /api/todos/**") or page path'),
+  files: z.array(z.string()).min(1).describe('Source files or globs relative to the project root'),
+  description: z.string().optional(),
+});
+export type CodeMapRule = z.infer<typeof CodeMapRuleSchema>;
+
 export const TargetConfigSchema = z.object({
   id: z
     .string()
@@ -97,6 +110,10 @@ export const TargetConfigSchema = z.object({
   identities: z.array(IdentitySchema).default([]),
   invariants: z.array(InvariantSchema).default([]),
   scope: ScopeSchema.prefault({}),
+  codemap: z
+    .array(CodeMapRuleSchema)
+    .default([])
+    .describe('Explicit mapping from endpoints and pages to source files'),
 });
 export type TargetConfig = z.infer<typeof TargetConfigSchema>;
 export type TargetConfigInput = z.input<typeof TargetConfigSchema>;

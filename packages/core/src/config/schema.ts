@@ -187,6 +187,12 @@ export const ScheduleConfigSchema = z.object({
         expression: z.string().min(1),
         action: ScheduleActionSchema.default('cycle'),
         target: z.string().optional(),
+        changedOnly: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Replay only the workflows affected by commits since the last run (and those never run)',
+          ),
       }),
     )
     .default([]),

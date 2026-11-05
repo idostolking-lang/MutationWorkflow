@@ -36,6 +36,8 @@ import {
   explore,
   explorerInstructions,
 } from './explore.js';
+import { changedFiles as gitChangedFiles } from './git.js';
+import { type ImpactReport, impactOnTarget } from './impact.js';
 import { JobManager } from './jobs.js';
 import {
   applyAgentVariants,
@@ -45,7 +47,7 @@ import {
   mutate,
   mutationBrief,
 } from './mutate.js';
-import { type RunOptions, type RunSummary, runWorkflows } from './run.js';
+import { LAST_RUN_COMMIT_KEY, type RunOptions, type RunSummary, runWorkflows } from './run.js';
 import {
   applyInspectionReport,
   type InspectionBrief,
@@ -107,6 +109,24 @@ export interface StatusSummary {
   usage: UsageTotals;
   openQuestions: number;
 }
+
+/** A code change, as the files themselves or as a git range to diff. */
+export interface ChangeSpec {
+  /** Changed paths relative to the project root; wins over `range`. */
+  files?: string[];
+  /** A git range such as `abc123..HEAD`. Default: the commit the last run saw, up to HEAD. */
+  range?: string;
+}
+
+export interface ImpactOptions extends ChangeSpec {
+  targetIds?: string[];
+}
+
+export type EngineRunOptions = Omit<RunOptions, 'targets' | 'changedFiles'> & {
+  targetIds?: string[];
+  /** Replay only the workflows this change affects (plus those never run). */
+  changed?: ChangeSpec;
+};
 
 export interface WatchOptions extends Pick<AgentHooks, 'jobId' | 'onEvent'> {
   targetIds?: string[];
@@ -406,10 +426,25 @@ export class Engine {
     );
   }
 
-  /** Replay workflows, record runs, fold failures into findings, triage and report. */
-  async run(options: Omit<RunOptions, 'targets'> & { targetIds?: string[] }): Promise<RunSummary> {
-    const { targetIds, ...rest } = options;
-    return runWorkflows(
+  /**
+   * Replay workflows, record runs, fold failures into findings, triage and report. With
+   * `changed`, only the workflows whose learned footprint overlaps the change replay (plus the
+   * ones never run); when the change cannot be determined, everything runs and the summary says so.
+   */
+  async run(options: EngineRunOptions): Promise<RunSummary> {
+    const { targetIds, changed, ...rest } = options;
+    const errors: string[] = [];
+    let changedFiles: string[] | undefined;
+    if (changed) {
+      try {
+        changedFiles = (await this.resolveChange(changed)).files;
+      } catch (error) {
+        const message = `${errorMessage(error)} Replaying every workflow instead.`;
+        this.logger.warn(message);
+        errors.push(message);
+      }
+    }
+    const summary = await runWorkflows(
       {
         store: this.store,
         config: this.config,
@@ -422,8 +457,38 @@ export class Engine {
         runtime: this.agents,
         logger: this.logger,
       },
-      { ...rest, targets: this.targets(targetIds) },
+      { ...rest, targets: this.targets(targetIds), ...(changedFiles ? { changedFiles } : {}) },
     );
+    return errors.length > 0 ? { ...summary, errors: [...errors, ...summary.errors] } : summary;
+  }
+
+  /**
+   * Which workflows a code change affects, from what each workflow learned about the pages,
+   * endpoints and files it exercises. Nothing runs.
+   */
+  async impact(options: ImpactOptions = {}): Promise<ImpactReport> {
+    const { files, range } = await this.resolveChange(options);
+    const targets: ImpactReport['targets'] = [];
+    for (const target of this.targets(options.targetIds)) {
+      targets.push(await impactOnTarget(this.store, target.id, files));
+    }
+    return { changedFiles: files, ...(range ? { range } : {}), targets };
+  }
+
+  private async resolveChange(spec: ChangeSpec): Promise<{ files: string[]; range?: string }> {
+    if (spec.files) {
+      return { files: spec.files.map((file) => file.replace(/^\.\//, '').replaceAll('\\', '/')) };
+    }
+    const since = await this.store.meta.get(LAST_RUN_COMMIT_KEY);
+    const range = spec.range ?? `${since ?? 'HEAD~1'}..HEAD`;
+    const files = await gitChangedFiles(this.rootDir, range);
+    if (files === undefined) {
+      throw new MutationWorkflowError(
+        'GIT_UNAVAILABLE',
+        `Could not list the files changed in "${range}" under ${this.rootDir}; it needs a git repository with that history (shallow clones may lack it). Pass the changed files explicitly instead.`,
+      );
+    }
+    return { files, range };
   }
 
   /** Review findings that are waiting for triage (optionally including ones skipped earlier). */

@@ -107,6 +107,11 @@ describe('web adapter against examples/todo-web', () => {
     expect(
       await session.check({ type: 'element-count', target: milkItems, count: 1 }),
     ).toMatchObject({ passed: true });
+    const footprint = session.footprint?.();
+    expect(footprint?.urls).toEqual(['/']);
+    expect(footprint?.endpoints).toEqual(
+      expect.arrayContaining(['GET /api/todos', 'POST /api/todos']),
+    );
     expect(await session.check({ type: 'http', url: '/api/health', status: 200 })).toMatchObject({
       passed: true,
     });
@@ -216,6 +221,15 @@ describe('web adapter against examples/todo-web', () => {
     expect(otherHits).toEqual(['GET /font.woff2']);
     otherHits.length = 0;
     drain();
+
+    // Neither the blocked requests and navigation nor the out-of-scope GET are in the footprint.
+    const footprint = session.footprint?.();
+    expect(footprint?.urls).toEqual(['/']);
+    const touched = [...(footprint?.urls ?? []), ...(footprint?.endpoints ?? [])];
+    for (const path of ['/charge', '/font.woff2', '/elsewhere']) {
+      expect(touched.filter((entry) => entry.endsWith(path))).toEqual([]);
+    }
+    expect(footprint?.endpoints.every((entry) => /^[A-Z]+ \/api\//.test(entry))).toBe(true);
   });
 
   it('closes popups and keeps working in the original tab', async () => {

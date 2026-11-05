@@ -79,6 +79,20 @@ export const SignalSchema = z.object({
 });
 export type Signal = z.infer<typeof SignalSchema>;
 
+/**
+ * What a session touched: the pages or screens visited and the backend endpoints or commands
+ * used. Adapters report it; the engine turns it into the files a workflow exercises, so a code
+ * change can be matched to the workflows worth replaying.
+ */
+export const FootprintSchema = z.object({
+  urls: z.array(z.string()).default([]).describe('Paths of pages or screens visited, without host'),
+  endpoints: z
+    .array(z.string())
+    .default([])
+    .describe('Backend endpoints or commands used, e.g. "POST /api/todos" or "add"'),
+});
+export type Footprint = z.infer<typeof FootprintSchema>;
+
 export const AssertionScopeSchema = z.enum(['step', 'final', 'invariant']);
 export type AssertionScope = z.infer<typeof AssertionScopeSchema>;
 
@@ -142,6 +156,7 @@ export const RunSchema = z.object({
   oracles: z.array(OracleResultSchema).default([]),
   evidenceIds: z.array(z.string()).default([]),
   context: RunContextSchema,
+  touched: FootprintSchema.prefault({}),
   error: z.string().optional().describe('Infrastructure error message when status is "error"'),
 });
 export type Run = z.infer<typeof RunSchema>;

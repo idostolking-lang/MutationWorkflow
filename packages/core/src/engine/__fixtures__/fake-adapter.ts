@@ -4,6 +4,7 @@ import {
   type AdapterDescription,
   type AdapterSession,
   type Assertion,
+  type Footprint,
   nowIso,
   type Signal,
 } from '../../index.js';
@@ -43,11 +44,13 @@ export class FakeSession implements AdapterSession {
   draft = '';
   opened = false;
   private signals: Signal[] = [];
+  private readonly touched: Footprint = { urls: [], endpoints: [] };
 
   async perform(action: Action) {
     const type = action.type;
     if (type === 'go') {
       this.opened = true;
+      this.visit('/');
       return { status: 'ok' as const, evidence: [] };
     }
     if (!this.opened) return { status: 'blocked' as const, message: 'app not open', evidence: [] };
@@ -66,12 +69,14 @@ export class FakeSession implements AdapterSession {
         if (!this.draft)
           return { status: 'blocked' as const, message: 'nothing to add', evidence: [] };
         this.items.push(this.draft);
+        this.call('POST /api/items');
         return { status: 'ok' as const, evidence: [] };
       }
       if (name === 'remove') {
         if (this.items.length === 0)
           return { status: 'blocked' as const, message: 'nothing to remove', evidence: [] };
         this.items.pop();
+        this.call(`DELETE /api/items/${this.items.length + 1}`);
         return { status: 'ok' as const, evidence: [] };
       }
       if (name === 'crash') {
@@ -107,6 +112,18 @@ export class FakeSession implements AdapterSession {
     const out = this.signals;
     this.signals = [];
     return out;
+  }
+
+  footprint(): Footprint {
+    return { urls: [...this.touched.urls], endpoints: [...this.touched.endpoints] };
+  }
+
+  private visit(path: string) {
+    if (!this.touched.urls.includes(path)) this.touched.urls.push(path);
+  }
+
+  private call(endpoint: string) {
+    if (!this.touched.endpoints.includes(endpoint)) this.touched.endpoints.push(endpoint);
   }
 
   async capture() {

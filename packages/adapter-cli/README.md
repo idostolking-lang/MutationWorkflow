@@ -84,6 +84,14 @@ steps and process starts and exits. `capture('output')` stores the full transcri
 file; screenshots and DOM captures are not available. When an action is not `ok`, the tails of
 stdout and stderr are attached to its outcome.
 
+## Footprint
+
+`footprint()` reports the command words the session used, so the engine can tell which workflows
+exercise code changed by a push. `urls` is always empty. `endpoints` holds, for each `write`, the
+first word of the text (trimmed, lowercased) and, for each `exec`, its first extra argument or,
+without one, the configured command's basename. Entries are unique, in first-seen order, and
+capped at 200.
+
 ## Limitations
 
 The process runs with plain pipes, not a pseudo-terminal. Applications that check for a TTY may

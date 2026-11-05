@@ -66,6 +66,7 @@ function run(
     oracles: [],
     evidenceIds: [],
     context: { mutated: false },
+    touched: { urls: [], endpoints: [] },
     ...extra,
   };
 }

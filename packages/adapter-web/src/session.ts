@@ -6,6 +6,7 @@ import {
   type CheckOutcome,
   type Evidence,
   errorMessage,
+  type Footprint,
   type Observation,
   type SessionOptions,
   type Signal,
@@ -17,6 +18,7 @@ import type { BrowserContext, Page, Request, Route } from 'playwright';
 import { z } from 'zod';
 import { WebActionSchema } from './actions.js';
 import { evaluateAssertion, WebAssertionSchema } from './assertions.js';
+import { FootprintRecorder } from './footprint.js';
 import { PageMonitor } from './monitor.js';
 import { type PerformResult, runAction } from './perform.js';
 import { compileDenyText, outOfScopeReason, requestBlockReason } from './scope.js';
@@ -37,6 +39,7 @@ const SETTLE_MAX_MS = 3000;
  */
 export class WebSession implements AdapterSession {
   private readonly monitor: PageMonitor;
+  private readonly recorder: FootprintRecorder;
   private readonly denyText: RegExp[];
   /** Main-frame navigations the route aborted since the last action began, as reasons. */
   private blockedNavigations: string[] = [];
@@ -51,7 +54,8 @@ export class WebSession implements AdapterSession {
     private readonly options: SessionOptions,
   ) {
     this.denyText = compileDenyText(options.scope.denyText);
-    this.monitor = new PageMonitor(page);
+    this.recorder = new FootprintRecorder(options.scope, baseUrl);
+    this.monitor = new PageMonitor(page, this.recorder);
     context.setDefaultTimeout(options.stepTimeoutMs);
     context.on('page', (opened) => {
       if (opened !== this.page) void this.closePopup(opened);
@@ -169,6 +173,14 @@ export class WebSession implements AdapterSession {
         ? undefined
         : await this.screenshot({ label: 'observe', stepId: this.monitor.stepId });
     return { url, title, summary, ...(screenshot ? { screenshot } : {}) };
+  }
+
+  /**
+   * What the session touched so far: the in-scope pages the main frame visited, and the
+   * in-scope requests to the backend (`"<METHOD> <path>"`), each unique in first-seen order.
+   */
+  footprint(): Footprint {
+    return this.recorder.snapshot();
   }
 
   drainSignals(): Signal[] {

@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createWorkflow, type Finding, nowIso, type Run } from '../schema/index.js';
+import { createWorkflow, type Evidence, type Finding, nowIso, type Run } from '../schema/index.js';
 import { describeAction, renderReport, writeReport } from './report.js';
 
 const workflow = createWorkflow(
@@ -33,6 +33,7 @@ const run: Run = {
   oracles: [],
   evidenceIds: [],
   context: { mutated: false },
+  touched: { urls: ['/', '/todos/42'], endpoints: ['GET /api/todos', 'POST /api/todos'] },
 };
 
 const finding: Finding = {
@@ -106,5 +107,47 @@ describe('reports', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+  it('embeds screenshots relative to the report, and says what the runs exercised', () => {
+    const shot: Evidence = {
+      id: 'ev_1',
+      runId: run.id,
+      kind: 'screenshot',
+      label: 'final-state',
+      path: 'runs/run_1/003-final-state.png',
+      mimeType: 'image/png',
+      createdAt: nowIso(),
+    };
+    const log: Evidence = {
+      id: 'ev_2',
+      runId: run.id,
+      kind: 'console',
+      text: 'x',
+      createdAt: nowIso(),
+    };
+    const markdown = renderReport({
+      title: 'Push run',
+      generatedAt: '2026-11-05T00:00:00.000Z',
+      targetIds: ['web'],
+      runs: [run],
+      workflows: new Map([[workflow.id, workflow]]),
+      findings: [finding],
+      stats: { total: 1, passed: 0, failed: 1, blocked: 0, error: 0 },
+      evidenceRoot: '/project/.mutationworkflow/evidence',
+      reportsDir: '/project/.mutationworkflow/reports',
+      evidence: new Map([
+        [shot.id, shot],
+        [log.id, log],
+      ]),
+      selection: { changedFiles: ['server.js', 'public/app.js'], everything: false },
+    });
+    expect(markdown).toContain('![final-state](../evidence/runs/run_1/003-final-state.png)');
+    expect(markdown).toContain(
+      '- Touched: 2 pages (/, /todos/42) and 2 endpoints (GET /api/todos, POST /api/todos)',
+    );
+    expect(markdown).toContain('Pages: `/`, `/todos/*`');
+    expect(markdown).toContain('Endpoints: `/api/todos (GET, POST)`');
+    expect(markdown).toContain('2 changed files; only the workflows that exercise them');
+    expect(markdown).toContain('Evidence: 2 items under');
   });
 });

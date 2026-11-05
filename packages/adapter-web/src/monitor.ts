@@ -1,5 +1,6 @@
 import { normalizeSignature, nowIso, type Signal, type SignalKind } from '@mutationworkflow/core';
 import type { ConsoleMessage, Page, Request, Response } from 'playwright';
+import type { FootprintRecorder } from './footprint.js';
 import { sleep } from './util.js';
 
 const CONSOLE_BUFFER_SIZE = 200;
@@ -21,7 +22,8 @@ const STREAMING_RESOURCE_TYPES = new Set(['eventsource', 'websocket']);
 /**
  * Watches one page: turns console errors, uncaught exceptions, failed requests, error responses
  * and crashes into signals, keeps recent console output for evidence, and tracks in-flight
- * requests so the session can wait for the page to settle after an action.
+ * requests so the session can wait for the page to settle after an action. With a footprint
+ * recorder, it also records the main-frame pages visited and the requests issued.
  */
 export class PageMonitor {
   /** Step the signals are attributed to: the step in progress, or the last one performed. */
@@ -33,7 +35,10 @@ export class PageMonitor {
   private readonly blocked = new WeakSet<Request>();
   private crashed = false;
 
-  constructor(page: Page) {
+  constructor(
+    page: Page,
+    private readonly footprint?: FootprintRecorder,
+  ) {
     page.on('console', (message) => this.onConsole(message));
     page.on('pageerror', (error) => {
       const message = `${error.name}: ${error.message}`;
@@ -42,6 +47,14 @@ export class PageMonitor {
     });
     page.on('request', (request) => {
       if (!STREAMING_RESOURCE_TYPES.has(request.resourceType())) this.pending.add(request);
+      this.footprint?.requested({
+        url: request.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+      });
+    });
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame()) this.footprint?.navigated(frame.url());
     });
     page.on('requestfinished', (request) => this.pending.delete(request));
     page.on('requestfailed', (request) => this.onRequestFailed(request));
