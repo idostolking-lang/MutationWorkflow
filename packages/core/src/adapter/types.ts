@@ -51,6 +51,8 @@ export interface SessionOptions {
   evidence: EvidenceSink;
   screenshots: 'always' | 'on-failure' | 'never';
   stepTimeoutMs: number;
+  /** How long an assertion may keep retrying before it fails; defaults to stepTimeoutMs. */
+  assertionTimeoutMs?: number;
   scope: Scope;
   logger: Logger;
 }
@@ -118,4 +120,9 @@ export type AdapterFactory = (options: AdapterFactoryOptions) => Promise<Adapter
 /** Shape of an adapter package's default export or module namespace. */
 export interface AdapterModule {
   createAdapter: AdapterFactory;
+  /**
+   * The adapter's vocabulary without a target, for setup flows that run before any target is
+   * configured (the inspector needs it to write workflows). Should equal `adapter.describe()`.
+   */
+  describe?: () => AdapterDescription;
 }

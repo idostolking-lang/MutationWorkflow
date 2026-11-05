@@ -1,6 +1,7 @@
 export * from './adapter/index.js';
 export * from './agents/index.js';
 export * from './config/index.js';
+export * from './engine/index.js';
 export * from './environment/index.js';
 export * from './mutations/index.js';
 export * from './oracles/index.js';

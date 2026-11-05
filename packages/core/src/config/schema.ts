@@ -86,6 +86,12 @@ export type MutationsConfig = z.infer<typeof MutationsConfigSchema>;
 export const ExecutionConfigSchema = z.object({
   parallel: z.number().int().positive().default(2).describe('Concurrent workflow executions'),
   stepTimeoutMs: z.number().int().positive().default(15_000),
+  assertionTimeoutMs: z
+    .number()
+    .int()
+    .positive()
+    .default(5_000)
+    .describe('How long an assertion may keep retrying before it counts as failed'),
   workflowTimeoutMs: z.number().int().positive().default(180_000),
   screenshots: z.enum(['always', 'on-failure', 'never']).default('on-failure'),
   resetBetweenRuns: z
@@ -156,7 +162,7 @@ export const ConfigSchema = z.object({
     name: z.string().min(1),
     description: z.string().optional(),
   }),
-  targets: z.array(TargetConfigSchema).min(1),
+  targets: z.array(TargetConfigSchema).default([]),
   providers: z
     .record(z.string(), ProviderConfigSchema)
     .prefault({})
