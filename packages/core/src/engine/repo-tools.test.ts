@@ -74,8 +74,8 @@ describe('repository tools', () => {
     const binary = await read.execute({ path: 'logo.png', offset: 0 }, context);
     expect(binary.isError).toBe(true);
     expect(text(binary)).toContain('binary');
-    const escape = await read.execute({ path: '../../etc/passwd', offset: 0 }, context);
-    expect(escape.isError).toBe(true);
+    const escaped = await read.execute({ path: '../../etc/passwd', offset: 0 }, context);
+    expect(escaped.isError).toBe(true);
     const missing = await read.execute({ path: 'nope.ts', offset: 0 }, context);
     expect(missing.isError).toBe(true);
   });
