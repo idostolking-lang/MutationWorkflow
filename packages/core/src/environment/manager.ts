@@ -30,6 +30,8 @@ export interface RunningEnvironment {
 }
 
 export interface EnvironmentManagerOptions {
+  /** How long to wait for a busy target before failing (default 30 s). */
+  lockTimeoutMs?: number;
   /** Project root; command working directories are resolved against it. */
   rootDir: string;
   logger: Logger;
@@ -40,6 +42,8 @@ export interface EnvironmentManagerOptions {
  * stops it on request. MutationWorkflow only tests applications it started itself, or that the
  * operator runs on localhost.
  */
+const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
+
 export class EnvironmentManager {
   private readonly logger: Logger;
   /** One environment per target at a time, so parallel jobs never fight over ports. */
@@ -59,7 +63,17 @@ export class EnvironmentManager {
     const baseUrl = typeof configuredBaseUrl === 'string' ? configuredBaseUrl : undefined;
     const output = new OutputBuffer();
     const { start } = target.environment;
-    const release = await this.lockFor(target.id).acquire();
+    let release: () => void;
+    try {
+      release = await this.lockFor(target.id).acquire(
+        this.options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
+      );
+    } catch {
+      throw new MutationWorkflowError(
+        'ENVIRONMENT_FAILED',
+        `Target "${target.id}" is busy: another run or exploration holds its environment. Close it or wait for it to finish.`,
+      );
+    }
     let proc: ShellProcess | undefined;
     try {
       proc = start ? await this.startProcess(target, start, output) : undefined;

@@ -33,6 +33,20 @@ reasoning behind the bigger choices is in the [decision records](adr/README.md).
 | triage   | fingerprinting, then the triager agent       | partially     | findings (new, merged, dismissed), questions          |
 | report   | renderer                                     | no            | Markdown report                                       |
 
+## Who does the thinking
+
+Every agent role is split into a brief (instructions, context and the schema of the expected
+result) and an apply step that stores the result. That split lets the same role run three ways:
+
+| Way | Model | Key | Typical use |
+| --- | --- | --- | --- |
+| Coding agent connected over MCP asks for the brief, thinks, submits | the client's own | none | interactive work in Claude Code, Codex or Cursor |
+| Coding agent command line as a driver (`claude-code`, `codex`) | the user's installation | none | autonomous runs on a developer machine |
+| Model API provider (`anthropic`, `openai`) | named in the config | API key | CI, servers, continuous mode |
+
+The in-process runtime owns the tool loop for model providers; drivers own their own loop and call
+the same tools over MCP; a connected client calls them through the MCP server's fine-grained tools.
+
 ## Packages
 
 - **`@mutationworkflow/core`** holds everything that is not specific to one kind of application:
@@ -48,9 +62,11 @@ reasoning behind the bigger choices is in the [decision records](adr/README.md).
   - `mutations/`: the operator interface, nine built-in operators and the registry that turns
     operator output into deduplicated workflows.
   - `oracles/`: the oracle interface, four built-in oracles and their registry.
-  - `agents/`: the provider-neutral message format, Anthropic and OpenAI-compatible providers, a
-    fake provider for tests, the runtime (tool loop, `finish` for structured results,
-    `delegate` for fan-out, the semaphore, budgets, usage records) and the role prompts.
+  - `agents/`: the provider-neutral message format; model providers (Anthropic, OpenAI-compatible)
+    called turn by turn; drivers that hand a whole task to a coding agent's command line (Claude
+    Code, Codex) and serve it the task's tools over an ephemeral MCP server; a fake provider for
+    tests; the runtime (tool loop, `finish` for structured results, `delegate` for fan-out, the
+    semaphore, budgets, usage records) and the role prompts. No model is ever chosen by default.
   - `engine/`: the executor, triage, exploration, mutation, setup, run, report and job modules,
     and the `Engine` facade that wires them to a configuration.
 - **`@mutationworkflow/adapter-web`** drives browsers through Playwright: robust locators

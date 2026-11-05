@@ -18,12 +18,29 @@ export class Semaphore {
     return this.available;
   }
 
-  /** Acquire a permit; the returned function releases it exactly once. */
-  async acquire(): Promise<() => void> {
+  /**
+   * Acquire a permit; the returned function releases it exactly once. With `timeoutMs`, waiting
+   * longer than that rejects instead of queueing forever.
+   */
+  async acquire(timeoutMs?: number): Promise<() => void> {
     if (this.available > 0) {
       this.available -= 1;
     } else {
-      await new Promise<void>((resolve) => this.waiters.push(resolve));
+      await new Promise<void>((resolve, reject) => {
+        const waiter = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer =
+          timeoutMs === undefined
+            ? undefined
+            : setTimeout(() => {
+                const index = this.waiters.indexOf(waiter);
+                if (index >= 0) this.waiters.splice(index, 1);
+                reject(new Error(`Timed out after ${timeoutMs} ms waiting for a permit`));
+              }, timeoutMs);
+        this.waiters.push(waiter);
+      });
     }
     let released = false;
     return () => {

@@ -21,10 +21,12 @@ records accept `--json` and then print JSON only, so `mw findings --json | jq` w
 | `-q, --quiet`         | Same as `--log-level error`; also hides agent progress                                                  |
 | `-V, --version`       | Print the version                                                                                       |
 
-Model providers are inferred from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` unless the config
-has a `providers` section. Commands that need agents (`setup`, `explore`, `triage`,
-`mutate --agent`) fail fast without one; `run`, `mutate`, `watch` and every read command work
-without a key.
+Unless the config has a `providers` section, providers are inferred from what is available: an
+installed Claude Code or Codex command line (used through your own subscription, no key) and the
+`ANTHROPIC_API_KEY` or `OPENAI_API_KEY` variables. API providers also need a model named in
+`agents.defaults.model`; there is no default. Commands that need agents (`setup`, `explore`,
+`triage`, `mutate --agent`) fail fast with a clear message otherwise; `run`, `mutate`, `watch` and
+every read command work without any model.
 
 ## Exit codes
 
@@ -75,7 +77,8 @@ config already exists it is left untouched and the proposal is written to
 Checks, one line each (`✓` ok, `!` warning, `✗` failure): Node.js ≥ 22.13, config found and
 valid, database opens, each target's adapter loads with its options, each target has an
 environment start command (warning when missing), Playwright and Chromium are installed (when a
-web target exists), API keys for configured or inferred providers (values are never printed).
+web target exists), and the configured or inferred providers (API keys present, coding-agent
+command lines installed; key values are never printed).
 Exits with 1 when any check fails.
 
 ## The loop
@@ -199,8 +202,9 @@ Everything lives under the project root, configurable in the config file:
 
 ## Continuous integration
 
-`mw run` starts the application itself, so a CI job only needs Node, the browser and a key for
-triage. `--fail-on high` fails the build when a high or critical finding was created or updated.
+`mw run` starts the application itself, so a CI job only needs Node, the browser and, for
+triage, a model provider: in CI that is usually an API key plus a model named in
+`agents.defaults.model` in the committed config (no coding agent is logged in there). `--fail-on high` fails the build when a high or critical finding was created or updated.
 Commit the config file; keep `.mutationworkflow/` out of Git, or cache it between builds to keep
 the memory (workflows and finding history).
 
