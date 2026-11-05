@@ -170,7 +170,8 @@ behind them are recorded in [docs/adr](docs/adr).
 
 Early and opinionated: version 0.1. The core loop works end to end for web and command-line
 applications. Planned next: a pseudo-terminal driver for full-screen terminal apps, desktop
-adapters through accessibility APIs, a Postgres store for teams, and richer invariants.
+adapters through accessibility APIs, export and import of workflows as files so CI needs no
+cache, a Postgres store for teams, and richer invariants.
 Contributions welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
