@@ -98,9 +98,13 @@ export function registerClientDrivenTools(server: McpServer, engine: Engine): vo
     {
       title: 'Triage brief (judge findings yourself)',
       description:
-        "Returns the triager's instructions, one batch of findings waiting for triage as dossiers (workflow, mutation, steps, signals, failed expectations, evidence ids), their ids and the JSON schema of the decisions. Judge each finding, then submit with mw_triage_apply. Says so when nothing is pending.",
+        "Returns the triager's instructions, one batch of findings waiting for triage as dossiers (workflow, mutation, steps, signals, failed expectations, evidence ids), their ids, the ids of everything still waiting on the target, and the JSON schema of the decisions. Judge each finding, then submit with mw_triage_apply. Says so when nothing is pending. To triage in parallel, split the waiting ids between sub-agents and give each its batch as findingIds.",
       inputSchema: {
         target: z.string().optional().describe('Target id; the first target with pending findings'),
+        findingIds: z
+          .array(z.string())
+          .optional()
+          .describe('Brief exactly these findings (all of one target) instead of the next batch'),
         includeSkipped: z
           .boolean()
           .optional()
@@ -120,6 +124,7 @@ export function registerClientDrivenTools(server: McpServer, engine: Engine): vo
         targetId: args.target,
         includeSkipped: args.includeSkipped,
         limit: args.limit,
+        findingIds: args.findingIds,
       });
       if (!brief) {
         return textResult(
@@ -133,7 +138,7 @@ export function registerClientDrivenTools(server: McpServer, engine: Engine): vo
       }
       return textBlocks(
         [
-          `Triage brief for target ${brief.targetId}: ${brief.findingIds.length} finding(s): ${brief.findingIds.join(', ')}. You are the triager.`,
+          `Triage brief for target ${brief.targetId}: ${brief.findingIds.length} finding(s): ${brief.findingIds.join(', ')}. You are the triager. Waiting on this target in total: ${brief.waitingIds.length} (${brief.waitingIds.join(', ')}).`,
           'Look at evidence with mw_evidence {"id": "ev_..."} (where the instructions mention get_evidence), at runs with mw_run_detail (get_run), at workflows with mw_workflow (get_workflow) and at findings with mw_finding; read the code the steps exercise.',
           'Then call mw_triage_apply {"decisions": [...]} with one decision per finding id, matching the schema below; it replaces the finish tool. not-a-bug dismisses the finding, needs-human becomes a question for the team. Call mw_triage_brief again for the next batch.',
         ].join('\n'),

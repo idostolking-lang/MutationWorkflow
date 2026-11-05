@@ -45,6 +45,7 @@ const TOOLS = [
   'mw_inspect_brief',
   'mw_inspect_apply',
   'mw_explore_open',
+  'mw_explore_sessions',
   'mw_observe',
   'mw_act',
   'mw_check',

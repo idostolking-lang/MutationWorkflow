@@ -1,7 +1,8 @@
 /**
- * Live exploration sessions a connected coding agent drives through MCP tools. Each session
- * holds a running environment, so the registry closes sessions that sit idle and every session
- * when the client disconnects.
+ * Live exploration sessions a connected coding agent drives through MCP tools. Sessions on one
+ * target share its running environment (the engine stops it when the last one closes), so a
+ * client may open one per sub-agent. The registry closes sessions that sit idle and every
+ * session when the client disconnects.
  */
 import {
   type ExplorationHandle,
@@ -41,12 +42,14 @@ export class ExplorationRegistry {
     return this.entries.size;
   }
 
-  /** The open session on `targetId`, if any (one per target: they share its environment lock). */
-  forTarget(targetId: string): ExplorationHandle | undefined {
-    for (const entry of this.entries.values()) {
-      if (entry.handle.targetId === targetId) return entry.handle;
-    }
-    return undefined;
+  /** Every open session, oldest first. */
+  list(): ExplorationHandle[] {
+    return [...this.entries.values()].map((entry) => entry.handle);
+  }
+
+  /** The open sessions on `targetId`. */
+  forTarget(targetId: string): ExplorationHandle[] {
+    return this.list().filter((handle) => handle.targetId === targetId);
   }
 
   add(handle: ExplorationHandle): void {
@@ -75,7 +78,7 @@ export class ExplorationRegistry {
     return this.touch(sessionId).handle;
   }
 
-  /** Close one session (stops its environment) and forget it. */
+  /** Close one session (its environment stops with the last session on the target) and forget it. */
   async close(sessionId: string): Promise<CloseResult> {
     const entry = this.require(sessionId);
     this.entries.delete(sessionId);

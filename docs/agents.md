@@ -78,7 +78,7 @@ failing start command becomes a `setup` question.
 | ----------------------- | --------------------------------------------------------------------------------- | ------------------------------------ | ------------------------------------------------- |
 | **Model provider** (`anthropic`, `openai`) | MutationWorkflow calls the model API turn by turn and executes the tools itself | An API key from the environment      | `providers` (or an API key variable) and `agents` |
 | **Driver** (`claude-code`, `codex`)        | Your installed coding-agent command line runs the whole task; MutationWorkflow serves it the role's tools over MCP | Your own login or subscription of that CLI; no API key | `providers` (or the CLI on `PATH`) and `agents` |
-| **MCP client**          | A coding agent connected to `mw` over MCP asks for a brief and submits the result | Whatever the client uses; its own model | Nothing in the config; see [MCP](mcp.md)          |
+| **MCP client**          | A coding agent connected to `mw` over MCP asks for a brief and submits the result; its own sub-agents can each take a session, a batch of findings or a workflow | Whatever the client uses; its own model | Nothing in the config; see [MCP](mcp.md)          |
 
 The first two run inside MutationWorkflow commands (`mw setup`, `mw explore`, `mutate --agent`,
 triage after runs) and are configured below. With the third, the connected client does the

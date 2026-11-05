@@ -6,6 +6,7 @@ import {
   createWorkflow,
   Engine,
   type Finding,
+  FindingSchema,
   newId,
   nowIso,
   openSqliteStore,
@@ -95,6 +96,57 @@ describe('client-driven engine operations', () => {
     expect(result.workflows[0]?.expect).toHaveLength(1);
     expect(result.questions).toHaveLength(1);
     expect(await handle.close()).toEqual(result);
+    expect((await engine.status()).targets[0]?.workflows.pendingReview).toBe(1);
+  });
+
+  it('lets parallel sessions on one target share its environment and saved titles', async () => {
+    let starts = 0;
+    let stops = 0;
+    const original = engine.environments.start.bind(engine.environments);
+    engine.environments.start = async (target) => {
+      starts += 1;
+      const env = await original(target);
+      const stop = env.stop.bind(env);
+      env.stop = async () => {
+        stops += 1;
+        await stop();
+      };
+      return env;
+    };
+
+    const [first, second] = await Promise.all([
+      engine.openExploration('app', { focus: ['adding'], maxWorkflows: 2 }),
+      engine.openExploration('app', { focus: ['removing'], maxWorkflows: 2 }),
+    ]);
+    expect(starts).toBe(1);
+    expect(engine.openExplorations.get('app')).toBe(2);
+    expect(first.id).not.toBe(second.id);
+
+    const journey = async (handle: typeof first, value: string) => {
+      await handle.session.callTool('act', { action: { type: 'go' } });
+      await handle.session.callTool('act', { action: { type: 'type', value } });
+      await handle.session.callTool('act', { action: { type: 'do', name: 'add' } });
+      return handle.session.callTool('save_workflow', {
+        title: `Add ${value}`,
+        intent: 'Add an item',
+        expect: [{ type: 'has', value }],
+      });
+    };
+    // The same journey recorded by both sessions at once is saved exactly once.
+    const [a, b] = await Promise.all([journey(first, 'Eggs'), journey(second, 'Eggs')]);
+    const texts = [JSON.stringify(a.content), JSON.stringify(b.content)];
+    expect(texts.filter((t) => t.includes('identical workflow already exists'))).toHaveLength(1);
+    expect(texts.filter((t) => t.includes('verified expectation'))).toHaveLength(1);
+    // Each session sees what the other saved.
+    const known = await second.session.callTool('list_workflows', {});
+    expect(JSON.stringify(known.content)).toContain('Add Eggs');
+
+    await first.close();
+    expect(stops).toBe(0);
+    expect(engine.openExplorations.get('app')).toBe(1);
+    await second.close();
+    expect(stops).toBe(1);
+    expect(engine.openExplorations.has('app')).toBe(false);
     expect((await engine.status()).targets[0]?.workflows.pendingReview).toBe(1);
   });
 
@@ -201,6 +253,44 @@ describe('client-driven engine operations', () => {
     });
     expect(updated[0]?.triage).toMatchObject({ state: 'done', verdict: 'bug', model: 'client' });
     expect(await engine.triageBrief()).toBeUndefined();
+  });
+
+  it('briefs exactly the findings a client names and lists everything waiting', async () => {
+    const workflow = createWorkflow(
+      'app',
+      { title: 'Crash', intent: 'Crash', steps: [{ action: { type: 'go' } }] },
+      { origin: 'seed' },
+    );
+    await engine.store.workflows.insert(workflow);
+    const findings = await Promise.all(
+      ['one', 'two', 'three'].map(async (name) => {
+        const finding = FindingSchema.parse({
+          id: newId('fnd'),
+          targetId: 'app',
+          fingerprint: `fp-${name}`,
+          title: `Problem ${name}`,
+          summary: `The app failed in way ${name}`,
+          severity: 'medium',
+          detectedBy: 'app-error',
+          status: 'open',
+          triage: { state: 'pending' },
+          workflowIds: [workflow.id],
+          occurrences: 1,
+          firstSeenAt: nowIso(),
+          lastSeenAt: nowIso(),
+        });
+        await engine.store.findings.insert(finding);
+        return finding;
+      }),
+    );
+    const [one, two, three] = findings;
+    const brief = await engine.triageBrief({ findingIds: [two?.id ?? '', three?.id ?? ''] });
+    expect(brief?.findingIds.sort()).toEqual([two?.id, three?.id].sort());
+    expect(brief?.waitingIds.sort()).toEqual([one?.id, two?.id, three?.id].sort());
+    const next = await engine.triageBrief({ limit: 1 });
+    expect(next?.findingIds).toHaveLength(1);
+    expect(next?.waitingIds).toHaveLength(3);
+    await expect(engine.triageBrief({ findingIds: ['fnd_missing'] })).rejects.toThrow(/No finding/);
   });
 
   it('briefs the client on a workflow and stores its proposed variants', async () => {

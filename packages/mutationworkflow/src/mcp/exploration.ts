@@ -37,20 +37,18 @@ function pickTarget(engine: Engine, id: string | undefined): TargetConfig {
   return first;
 }
 
-/** Register mw_explore_open, the per-session tools and mw_explore_close. */
+/** Register mw_explore_open, mw_explore_sessions, the per-session tools and mw_explore_close. */
 export function registerExplorationTools(
   server: McpServer,
   engine: Engine,
   sessions: ExplorationRegistry,
 ): void {
-  const opening = new Set<string>();
-
   server.registerTool(
     'mw_explore_open',
     {
       title: 'Open an exploration (explore yourself)',
       description:
-        "Start the target's app in a fresh local environment and open a live session you drive yourself. Returns the sessionId, the explorer's instructions, the remaining workflow budget and the first observation (with a screenshot when the adapter takes one). Then use mw_act / mw_check / mw_save_workflow / mw_reset_session, and finish with mw_explore_close. One session per target; sessions idle for 30 minutes are closed. Needs no model provider.",
+        "Start the target's app in a fresh local environment (or join the one already running for it) and open a live session you drive yourself. Returns the sessionId, the explorer's instructions, the remaining workflow budget and the first observation (with a screenshot when the adapter takes one). Then use mw_act / mw_check / mw_save_workflow / mw_reset_session, and finish with mw_explore_close. To explore in parallel, open one session per sub-agent, each with its own focus: sessions on one target share the app and the saved titles, each has its own browser or process. Sessions idle for 30 minutes are closed. Needs no model provider.",
       inputSchema: {
         target: z.string().optional().describe('Target id (optional when only one is configured)'),
         focus: z.array(z.string()).optional().describe('Areas or features to prioritise'),
@@ -65,36 +63,30 @@ export function registerExplorationTools(
     },
     safe(async (args) => {
       const target = pickTarget(engine, args.target);
-      const existing = sessions.forTarget(target.id);
-      if (existing || opening.has(target.id)) {
-        throw new MutationWorkflowError(
-          'INVALID_INPUT',
-          `An exploration session is already open on "${target.id}"${existing ? ` (${existing.id})` : ''}. Keep using it, or close it with mw_explore_close first: sessions on one target share its environment.`,
-        );
-      }
-      opening.add(target.id);
-      let handle: Awaited<ReturnType<Engine['openExploration']>>;
-      try {
-        handle = await engine.openExploration(target.id, {
-          focus: args.focus,
-          maxWorkflows: args.maxWorkflows,
-        });
-        sessions.add(handle);
-      } finally {
-        opening.delete(target.id);
-      }
+      const handle = await engine.openExploration(target.id, {
+        focus: args.focus,
+        maxWorkflows: args.maxWorkflows,
+      });
+      sessions.add(handle);
       const observation = toolOutputResult(await sessions.call(handle.id, 'observe', {}));
+      const others = sessions.forTarget(target.id).filter((h) => h.id !== handle.id);
       const info = {
         sessionId: handle.id,
         targetId: handle.targetId,
         remainingBudget: handle.session.remainingBudget,
+        otherSessionsOnTarget: others.map((h) => h.id),
       };
       const header = [
         `Opened exploration session ${handle.id} on ${handle.targetId}. You are the explorer; you may save up to ${info.remainingBudget} workflow(s).`,
         TOOL_MAP,
-        'Record one journey at a time: mw_act each step, verify with mw_check, mw_save_workflow with expectations that hold now, then mw_reset_session before the next journey. Close with mw_explore_close when the budget is used or nothing worthwhile is left; the environment keeps running until then.',
+        'Record one journey at a time: mw_act each step, verify with mw_check, mw_save_workflow with expectations that hold now, then mw_reset_session before the next journey. Close with mw_explore_close when the budget is used or nothing worthwhile is left; the app keeps running until the last session on it closes.',
+        others.length > 0
+          ? `${others.length} other session(s) explore this target right now; mw_list_known_workflows shows what they saved.`
+          : undefined,
         JSON.stringify(info),
-      ].join('\n');
+      ]
+        .filter((line): line is string => line !== undefined)
+        .join('\n');
       return {
         content: [
           { type: 'text', text: header },
@@ -106,6 +98,36 @@ export function registerExplorationTools(
           ...observation.content,
         ],
       };
+    }),
+  );
+
+  server.registerTool(
+    'mw_explore_sessions',
+    {
+      title: 'Open exploration sessions',
+      description:
+        'The exploration sessions open right now: id, target, when they opened, workflows saved and remaining budget. Use it to coordinate parallel explorers or to close a session a sub-agent left open.',
+      inputSchema: {},
+      annotations: LOOK,
+    },
+    safe(async () => {
+      const list = sessions.list().map((handle) => ({
+        sessionId: handle.id,
+        targetId: handle.targetId,
+        openedAt: handle.openedAt,
+        saved: handle.session.saved.length,
+        remainingBudget: handle.session.remainingBudget,
+      }));
+      const text =
+        list.length === 0
+          ? 'No exploration session is open.'
+          : list
+              .map(
+                (s) =>
+                  `${s.sessionId}  ${s.targetId}  opened ${s.openedAt}  saved ${s.saved}  budget left ${s.remainingBudget}`,
+              )
+              .join('\n');
+      return textResult(text, { sessions: list });
     }),
   );
 

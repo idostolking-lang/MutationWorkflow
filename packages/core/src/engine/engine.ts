@@ -3,7 +3,11 @@ import { createProviders } from '../agents/providers/index.js';
 import { type AgentEvent, AgentRuntime } from '../agents/runtime.js';
 import { loadConfig, type ResolvedConfig } from '../config/load.js';
 import type { AgentRole, Config } from '../config/schema.js';
-import { EnvironmentManager, withEnvironment } from '../environment/manager.js';
+import {
+  EnvironmentManager,
+  type RunningEnvironment,
+  withEnvironment,
+} from '../environment/manager.js';
 import { resolveOracles } from '../oracles/registry.js';
 import type { Oracle } from '../oracles/types.js';
 import {
@@ -28,6 +32,7 @@ import { openSqliteStore } from '../store/sqlite.js';
 import type { RunStats, Store, UsageTotals } from '../store/types.js';
 import { errorMessage, MutationWorkflowError } from '../util/errors.js';
 import { createLogger, type Logger } from '../util/logger.js';
+import { Semaphore } from '../util/semaphore.js';
 import { type AdapterLoader, AdapterRegistry } from './adapters.js';
 import {
   ExplorationSession,
@@ -135,6 +140,13 @@ export interface WatchOptions extends Pick<AgentHooks, 'jobId' | 'onEvent'> {
   onCycle?: (cycle: number, summary: RunSummary | undefined, error?: string) => void;
 }
 
+/** A triage brief for a connected client, with everything waiting on the target listed. */
+export type ClientTriageBrief = TriageBrief & {
+  targetId: string;
+  /** Ids of every finding waiting for triage on the target, briefed or not. */
+  waitingIds: string[];
+};
+
 export interface AnswerResult {
   question: Question;
   workflow?: Workflow;
@@ -143,8 +155,8 @@ export interface AnswerResult {
 
 /**
  * A live exploration driven from outside the engine: a coding agent connected over MCP calls the
- * session's tools one at a time and closes the handle when done. The environment the session
- * runs against stays up until then.
+ * session's tools one at a time and closes the handle when done. Sessions on one target share
+ * its environment, which stays up until the last of them closes.
  */
 export interface ExplorationHandle {
   id: string;
@@ -156,6 +168,14 @@ export interface ExplorationHandle {
 }
 
 const ROLES: AgentRole[] = ['inspector', 'explorer', 'mutator', 'triager'];
+
+/** The environment and shared state behind every open client-driven session of one target. */
+interface ExplorationLease {
+  env: Promise<RunningEnvironment>;
+  sessions: number;
+  titles: Set<string>;
+  lock: Semaphore;
+}
 
 /**
  * The engine wires configuration, memory, adapters, environments and agents together and
@@ -177,6 +197,7 @@ export class Engine {
   private currentReportsDir: string;
   private currentAgents: AgentRuntime;
   private currentOracles: Oracle[];
+  private readonly leases = new Map<string, ExplorationLease>();
 
   private constructor(
     private readonly options: EngineOptions,
@@ -594,12 +615,23 @@ export class Engine {
   ): Promise<ExplorationHandle> {
     const target = this.target(targetId);
     const adapter = await this.registry.forTarget(target);
-    const env = await this.environments.start(target);
+    // Sessions on one target share its environment: the first open starts it, the last close
+    // stops it, so a client can fan out several explorers against one running app.
+    const lease = this.leaseFor(target);
+    lease.sessions += 1;
+    let env: RunningEnvironment;
+    try {
+      env = await lease.env;
+    } catch (error) {
+      await this.releaseLease(target.id);
+      throw error;
+    }
     const known = await this.store.workflows.list({
       targetId: target.id,
       parentId: null,
       status: ['active', 'pending-review'],
     });
+    for (const workflow of known) lease.titles.add(workflow.title);
     const maxWorkflows = options.maxWorkflows ?? this.config.exploration.maxWorkflows;
     const deps = {
       store: this.store,
@@ -611,12 +643,12 @@ export class Engine {
     };
     const session = new ExplorationSession(deps, {
       vision: options.vision ?? true,
-      shared: { titles: new Set(known.map((w) => w.title)), saved: 0, budget: maxWorkflows },
+      shared: { titles: lease.titles, saved: 0, budget: maxWorkflows, lock: lease.lock },
     });
     try {
       await session.open();
     } catch (error) {
-      await env.stop();
+      await this.releaseLease(target.id);
       throw error;
     }
     const assignment =
@@ -639,7 +671,7 @@ export class Engine {
       close: () => {
         closed ??= (async () => {
           await session.close();
-          await env.stop();
+          await this.releaseLease(target.id);
           return { workflows: session.saved, questions: session.questions };
         })();
         return closed;
@@ -647,20 +679,79 @@ export class Engine {
     };
   }
 
+  /** Open client-driven sessions per target. */
+  get openExplorations(): ReadonlyMap<string, number> {
+    return new Map([...this.leases].map(([targetId, lease]) => [targetId, lease.sessions]));
+  }
+
+  private leaseFor(target: TargetConfig): ExplorationLease {
+    let lease = this.leases.get(target.id);
+    if (!lease) {
+      lease = {
+        env: this.environments.start(target),
+        sessions: 0,
+        titles: new Set(),
+        lock: new Semaphore(1),
+      };
+      // The openers awaiting the start report its failure; the promise itself must not.
+      lease.env.catch(() => undefined);
+      this.leases.set(target.id, lease);
+    }
+    return lease;
+  }
+
+  private async releaseLease(targetId: string): Promise<void> {
+    const lease = this.leases.get(targetId);
+    if (!lease) return;
+    lease.sessions -= 1;
+    if (lease.sessions > 0) return;
+    this.leases.delete(targetId);
+    const env = await lease.env.catch(() => undefined);
+    await env?.stop();
+  }
+
   /**
    * Pending findings of one target with the triager's instructions, for a client that judges
-   * them itself. Returns undefined when nothing is waiting.
+   * them itself. Returns undefined when nothing is waiting. With `findingIds`, briefs exactly
+   * those findings (all of one target), so a client can split the waiting list between
+   * sub-agents; `waitingIds` lists everything waiting on the target for that purpose.
    */
   async triageBrief(
-    options: { targetId?: string; includeSkipped?: boolean; limit?: number } = {},
-  ): Promise<(TriageBrief & { targetId: string }) | undefined> {
+    options: {
+      targetId?: string;
+      includeSkipped?: boolean;
+      limit?: number;
+      findingIds?: string[];
+    } = {},
+  ): Promise<ClientTriageBrief | undefined> {
+    const includeSkipped = options.includeSkipped ?? false;
+    if (options.findingIds && options.findingIds.length > 0) {
+      const batch: Finding[] = [];
+      for (const id of options.findingIds) {
+        const finding = await this.store.findings.get(id);
+        if (!finding) throw new MutationWorkflowError('NOT_FOUND', `No finding with id ${id}`);
+        batch.push(finding);
+      }
+      const targetIds = [...new Set(batch.map((finding) => finding.targetId))];
+      const [targetId] = targetIds;
+      if (targetIds.length !== 1 || targetId === undefined) {
+        throw new MutationWorkflowError(
+          'INVALID_INPUT',
+          `One brief covers one target; these findings belong to ${targetIds.join(', ')}`,
+        );
+      }
+      const target = this.target(targetId);
+      const waiting = await this.triageCandidates(target.id, includeSkipped);
+      const brief = await triageBrief({ store: this.store, target, logger: this.logger }, batch);
+      return { ...brief, targetId: target.id, waitingIds: waiting.map((f) => f.id) };
+    }
     const targets = options.targetId ? [this.target(options.targetId)] : this.config.targets;
     for (const target of targets) {
-      const candidates = await this.triageCandidates(target.id, options.includeSkipped ?? false);
+      const candidates = await this.triageCandidates(target.id, includeSkipped);
       if (candidates.length === 0) continue;
       const batch = candidates.slice(0, options.limit ?? TRIAGE_BATCH_SIZE);
       const brief = await triageBrief({ store: this.store, target, logger: this.logger }, batch);
-      return { ...brief, targetId: target.id };
+      return { ...brief, targetId: target.id, waitingIds: candidates.map((f) => f.id) };
     }
     return undefined;
   }
@@ -846,6 +937,11 @@ export class Engine {
   }
 
   async close(): Promise<void> {
+    for (const [targetId, lease] of this.leases) {
+      this.leases.delete(targetId);
+      const env = await lease.env.catch(() => undefined);
+      await env?.stop().catch(() => undefined);
+    }
     await this.registry.disposeAll();
     await this.store.close();
   }

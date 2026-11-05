@@ -35,13 +35,27 @@ describe('ExplorationRegistry', () => {
     expect(() => registry.get('ses_a')).toThrow(/No open exploration session ses_a/);
   });
 
+  it('keeps several sessions per target and lists them oldest first', async () => {
+    const registry = new ExplorationRegistry({ logger: silentLogger });
+    const a = fakeHandle('ses_a', 'app');
+    const b = fakeHandle('ses_b', 'app');
+    const c = fakeHandle('ses_c', 'other');
+    for (const entry of [a, b, c]) registry.add(entry.handle);
+    expect(registry.list().map((h) => h.id)).toEqual(['ses_a', 'ses_b', 'ses_c']);
+    expect(registry.forTarget('app').map((h) => h.id)).toEqual(['ses_a', 'ses_b']);
+    await registry.close('ses_a');
+    expect(registry.forTarget('app').map((h) => h.id)).toEqual(['ses_b']);
+    expect(a.close).toHaveBeenCalledOnce();
+    expect(b.close).not.toHaveBeenCalled();
+  });
+
   it('closes every session once on shutdown and refuses new ones', async () => {
     const registry = new ExplorationRegistry({ logger: silentLogger });
     const a = fakeHandle('ses_a', 'one');
     const b = fakeHandle('ses_b', 'two');
     registry.add(a.handle);
     registry.add(b.handle);
-    expect(registry.forTarget('two')?.id).toBe('ses_b');
+    expect(registry.forTarget('two').map((h) => h.id)).toEqual(['ses_b']);
     await Promise.all([registry.closeAll(), registry.closeAll()]);
     expect(a.close).toHaveBeenCalledOnce();
     expect(b.close).toHaveBeenCalledOnce();

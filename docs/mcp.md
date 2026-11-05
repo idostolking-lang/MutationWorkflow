@@ -113,7 +113,8 @@ that cannot run with the current configuration, and why).
 | ------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `mw_inspect_brief`        | `projectName?`                                           | Inspector instructions, adapter vocabularies, report JSON schema. Read the repo with your own tools, then `mw_inspect_apply`              |
 | `mw_inspect_apply`        | `report`, `validate?`, `projectName?`                    | Config path and action (`created` or `proposal-written`), seeded workflows, questions, validation. An invalid report is an error to fix |
-| `mw_explore_open`         | `target?`, `focus?: string[]`, `maxWorkflows?`           | `sessionId`, explorer instructions, remaining budget, first observation (with screenshot). Then the session tools                       |
+| `mw_explore_open`         | `target?`, `focus?: string[]`, `maxWorkflows?`           | `sessionId`, explorer instructions, remaining budget, first observation (with screenshot). Then the session tools. One per sub-agent for parallel exploration |
+| `mw_explore_sessions`     | none                                                     | The open sessions: id, target, opened at, workflows saved, remaining budget                                                              |
 | `mw_observe`              | `sessionId`                                              | Current state (page structure or terminal output) and a screenshot when available                                                        |
 | `mw_act`                  | `sessionId`, `action`, `note?`                           | Outcome (ok, blocked, error), application error signals, resulting state. Successful actions are recorded as steps                      |
 | `mw_check`                | `sessionId`, `assertion`                                 | PASSED or FAILED with a message; records nothing                                                                                         |
@@ -121,8 +122,8 @@ that cannot run with the current configuration, and why).
 | `mw_reset_session`        | `sessionId`                                              | Fresh browser context or process, recorded steps cleared. Use between journeys                                                           |
 | `mw_use_identity`         | `sessionId`, `id`                                        | Acts as a configured identity (right after a reset); error when the target has none                                                     |
 | `mw_list_known_workflows` | `sessionId`                                              | Titles already in memory for the target, to avoid duplicates                                                                             |
-| `mw_explore_close`        | `sessionId`, `summary?`                                  | Stops the environment; the saved workflows and the questions raised. The summary is logged                                               |
-| `mw_triage_brief`         | `target?`, `includeSkipped?`, `limit?`                   | Triager instructions, dossiers of one batch (8 by default), finding ids, decision JSON schema; or "Nothing pending"                     |
+| `mw_explore_close`        | `sessionId`, `summary?`                                  | The saved workflows and the questions raised; the app stops with the last session on its target. The summary is logged                  |
+| `mw_triage_brief`         | `target?`, `findingIds?`, `includeSkipped?`, `limit?`    | Triager instructions, dossiers of one batch (8 by default, or exactly `findingIds`), the ids of everything waiting, decision JSON schema; or "Nothing pending" |
 | `mw_triage_apply`         | `decisions` (array, or `{"decisions": [...]}`)           | The updated findings. `not-a-bug` dismisses, `duplicateOf` merges, `needs-human` asks the team. Decided by `mcp-client`                 |
 | `mw_mutation_brief`       | `workflowId`                                             | Mutator instructions for one base workflow (with its steps and existing variants) and the variants JSON schema                          |
 | `mw_mutation_apply`       | `workflowId`, `variants` (array, or `{"variants": [...]}`) | The created variants (origin `mutation`, operator `agent`); duplicates and steps outside the vocabulary are skipped                     |
@@ -146,12 +147,16 @@ say how they map: `finish` is the apply tool (or `mw_explore_close`), the inspec
 ### Exploration sessions
 
 `mw_explore_open` starts the target's environment (its `environment.start` command, or a probe of
-its `baseUrl`) and opens one adapter session against it. The server keeps a registry of open
-sessions keyed by session id:
+its `baseUrl`), or joins the one already running for the target, and opens one adapter session
+against it (its own browser context or process). The server keeps a registry of open sessions
+keyed by session id:
 
-- One session per target at a time: sessions and replays of a target share its environment, so a
-  second `mw_explore_open` on the same target is refused, and `mw_run` on that target waits until
-  the session is closed.
+- Any number of sessions per target: they share the running app and the list of saved titles,
+  and the app stops when the last of them closes. A coding agent that can run sub-agents opens
+  one session per sub-agent, each with its own `focus`; `mw_explore_sessions` lists them. Two
+  sessions saving the same journey at the same time store it once.
+- Replays share the environment lock with explorations: `mw_run` on a target waits until its
+  sessions are closed.
 - Calls on one session run one after another.
 - A session idle for 30 minutes (no call naming it) is closed and its environment stopped; later
   calls get an error saying to open a new one. What was saved stays saved.

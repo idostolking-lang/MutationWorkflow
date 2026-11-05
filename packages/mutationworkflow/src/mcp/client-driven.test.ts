@@ -231,9 +231,17 @@ describe('client-driven exploration, triage and mutation', () => {
     expect(sessionId).not.toBe('');
     expect(opened).toContain('"remainingBudget":2');
 
+    // A second session on the same target joins the running app instead of being refused.
     const again = await call('mw_explore_open', { target: 'app' });
-    expect(again.isError).toBe(true);
-    expect(text(again)).toContain('already open');
+    expect(again.isError).toBeFalsy();
+    expect(text(again)).toContain('1 other session(s) explore this target');
+    const secondId = /Opened exploration session (ses_\w+)/.exec(text(again))?.[1] ?? '';
+    expect(secondId).not.toBe(sessionId);
+    const listed = text(await call('mw_explore_sessions'));
+    expect(listed).toContain(sessionId);
+    expect(listed).toContain(secondId);
+    expect((await call('mw_explore_close', { sessionId: secondId })).isError).toBeFalsy();
+    expect(text(await call('mw_explore_sessions'))).not.toContain(secondId);
 
     expect(text(await call('mw_act', { sessionId, action: { type: 'go' } }))).toContain(
       'recorded as step 1',

@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Parallel exploration over MCP: sessions on one target share its running app, so a connected
+  coding agent can open one `mw_explore_open` per sub-agent; `mw_explore_sessions` lists them,
+  and `mw_triage_brief` takes `findingIds` so the findings waiting for triage can be split
+  between sub-agents. The prompts explain the fan-out.
 - Core engine: workflow model, SQLite memory with full-text search, localhost environment
   manager, deterministic replay with evidence capture, oracles, finding deduplication and
   Markdown reports.

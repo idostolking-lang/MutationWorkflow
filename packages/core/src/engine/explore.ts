@@ -39,6 +39,7 @@ import {
 import type { Store } from '../store/types.js';
 import { errorMessage } from '../util/errors.js';
 import type { Logger } from '../util/logger.js';
+import { Semaphore } from '../util/semaphore.js';
 import { truncate } from '../util/text.js';
 import { applyIdentity } from './identity.js';
 
@@ -76,10 +77,15 @@ export interface ExploreResult {
 }
 
 /** Budget shared by explorers working on the same target at the same time. */
+/**
+ * What explorers working on the same target share: the titles saved so far (so they do not
+ * record the same journey twice), the count against the budget, and a lock around saving.
+ */
 export interface SharedBudget {
   titles: Set<string>;
   saved: number;
   budget: number;
+  lock: Semaphore;
 }
 
 /** Default angles when the operator gives no focus, so parallel explorers do not overlap. */
@@ -141,6 +147,7 @@ export async function explore(
     titles: new Set(known.map((w) => w.title)),
     saved: 0,
     budget: total,
+    lock: new Semaphore(1),
   };
   const fatal = new AbortController();
   const signal = deps.signal ? AbortSignal.any([deps.signal, fatal.signal]) : fatal.signal;
@@ -273,6 +280,7 @@ export class ExplorationSession {
       titles: new Set(),
       saved: 0,
       budget: deps.config.exploration.maxWorkflows,
+      lock: new Semaphore(1),
     };
     this.maxSteps = options.maxSteps ?? deps.config.exploration.maxStepsPerWorkflow;
     this.context = { role: 'explorer', depth: 0, logger: deps.logger.child('explore') };
@@ -520,22 +528,28 @@ export class ExplorationSession {
     }
     const steps = normalizeSteps(this.recorded);
     const fingerprint = workflowFingerprint(target.id, this.identity, steps);
-    const existing = await store.workflows.getByFingerprint(target.id, fingerprint);
     this.recorded = [];
-    if (existing) {
+    // Sessions exploring the same target in parallel must not save the same journey twice.
+    const outcome = await this.shared.lock.use(async () => {
+      const existing = await store.workflows.getByFingerprint(target.id, fingerprint);
+      if (existing) return { kind: 'duplicate' as const, existing };
+      const workflow = createWorkflow(
+        target.id,
+        { title, intent, steps, expect: verified, identity: this.identity, tags: ['discovered'] },
+        { origin: 'discovered', status: 'pending-review' },
+      );
+      await store.workflows.insert(workflow);
+      this.saved.push(workflow);
+      this.shared.saved += 1;
+      this.shared.titles.add(title);
+      return { kind: 'saved' as const, workflow };
+    });
+    if (outcome.kind === 'duplicate') {
       return ok(
-        `An identical workflow already exists: "${existing.title}" (${existing.id}). Nothing saved; try a different journey.`,
+        `An identical workflow already exists: "${outcome.existing.title}" (${outcome.existing.id}). Nothing saved; try a different journey.`,
       );
     }
-    const workflow = createWorkflow(
-      target.id,
-      { title, intent, steps, expect: verified, identity: this.identity, tags: ['discovered'] },
-      { origin: 'discovered', status: 'pending-review' },
-    );
-    await store.workflows.insert(workflow);
-    this.saved.push(workflow);
-    this.shared.saved += 1;
-    this.shared.titles.add(title);
+    const { workflow } = outcome;
 
     const screenshot = await this.live()
       .capture('screenshot', `final-${workflow.id}`)

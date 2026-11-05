@@ -195,7 +195,9 @@ and watches it find all three planted bugs from two hand-written workflows.
 MutationWorkflow is also an MCP server. Your coding agent can set it up, run it and discuss
 findings with you. Better: connected this way, your coding agent can **be the brain**. It asks
 the server for a brief, inspects or explores with its own model and your existing subscription,
-and submits the result. No API key, no second model, no extra bill.
+and submits the result. No API key, no second model, no extra bill. It can fan out too: each
+sub-agent it spawns opens its own exploration session on the same running app, takes its share
+of the findings to triage, or its own workflow to mutate.
 
 ```sh
 # Claude Code
