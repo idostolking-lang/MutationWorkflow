@@ -39,9 +39,9 @@ effects even if the UI offers them, stay in scope and treat a refusal as informa
   `credentials*`, `secrets*`, `.npmrc`, `.netrc` and `.aws`/`.azure`/`.gcloud` files, whatever the
   repository's `.gitignore` says. They never follow symbolic links and refuse any path that
   resolves outside the project. Generated and vendored directories (`node_modules` and the like)
-  are skipped, and file and listing sizes are capped. These rules belong to MutationWorkflow's
-  tools: with the `claude-code` driver the inspector also keeps Claude Code's own read-only file
-  tools (`--restricted`), which follow Claude Code's permission settings instead.
+  are skipped, and file and listing sizes are capped. The same rules hold under the `claude-code`
+  driver, because Claude Code's own file tools are switched off and the inspector reads the
+  repository through these tools only.
 - **Old screenshots.** Only the two most recent images stay in an agent's conversation; older
   ones are replaced by the placeholder `[earlier screenshot omitted to save context]`, which keeps
   long explorations within provider image limits and cost.
@@ -91,10 +91,10 @@ thinking itself: it requests a brief (`inspectionBrief`, `openExploration`, `tri
 A driver runs one agent task (one role invocation) as a subprocess of your coding agent:
 
 - **Claude Code** (`claude-code`): `claude -p <task> --output-format json --system-prompt ...
-  --mcp-config ... --strict-mcp-config --allowedTools mcp__mw --no-session-persistence`, plus
-  `--tools ""` (no built-in tools) for every role except the inspector, which runs with
-  `--restricted` and keeps Claude Code's own read-only file tools. It reports usage and cost,
-  which are recorded like API usage.
+  --mcp-config ... --strict-mcp-config --allowedTools mcp__mw --no-session-persistence
+  --tools ""`: no built-in tools for any role, so even the inspector reads the repository through
+  MutationWorkflow's credential-filtered tools. It reports usage and cost, which are recorded like
+  API usage.
 - **Codex** (`codex`, **experimental**: not exercised in CI): `codex exec --skip-git-repo-check
   --sandbox read-only -c mcp_servers.mw.url=... --output-last-message <file> <prompt>`, with the
   system prompt placed before the task. Codex reports neither tokens nor cost.
