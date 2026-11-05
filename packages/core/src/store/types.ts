@@ -28,6 +28,8 @@ export interface WorkflowFilter extends Page {
   status?: WorkflowStatus | WorkflowStatus[];
   /** `null` selects base workflows only (no parent); a string selects one parent's variants. */
   parentId?: string | null;
+  /** `true` selects mutation variants only, `false` base workflows only. */
+  hasParent?: boolean;
   tag?: string;
 }
 

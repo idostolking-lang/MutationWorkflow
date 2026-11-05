@@ -192,11 +192,15 @@ const JOBS: Entity<Job> = {
 /** Searchable text of a workflow's steps: notes, action types and string parameters. */
 function stepsText(workflow: Workflow): string {
   const parts: string[] = [];
+  const collect = (value: unknown): void => {
+    if (typeof value === 'string') parts.push(value);
+    else if (Array.isArray(value)) for (const item of value) collect(item);
+    else if (value && typeof value === 'object')
+      for (const item of Object.values(value)) collect(item);
+  };
   for (const step of workflow.steps) {
     if (step.note) parts.push(step.note);
-    for (const value of Object.values(step.action)) {
-      if (typeof value === 'string') parts.push(value);
-    }
+    collect(step.action);
   }
   return parts.join(' ');
 }
@@ -271,6 +275,8 @@ function workflowConditions(filter: WorkflowFilter): Conditions {
     .match('status', filter.status);
   if (filter.parentId === null) where.add('parent_id IS NULL');
   else where.match('parent_id', filter.parentId);
+  if (filter.hasParent === true) where.add('parent_id IS NOT NULL');
+  else if (filter.hasParent === false) where.add('parent_id IS NULL');
   if (filter.tag !== undefined) {
     where.add(
       "EXISTS (SELECT 1 FROM json_each(workflows.json, '$.tags') WHERE value = ?)",

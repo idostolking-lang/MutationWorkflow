@@ -59,16 +59,32 @@ export const AgentsConfigSchema = z.object({
 });
 export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;
 
+export const ModelPriceSchema = z
+  .object({
+    input: z.number().nonnegative(),
+    output: z.number().nonnegative(),
+    cacheRead: z
+      .number()
+      .nonnegative()
+      .optional()
+      .describe('Defaults to a tenth of the input price'),
+    cacheWrite: z.number().nonnegative().optional().describe('Defaults to 1.25x the input price'),
+  })
+  .describe('USD per million tokens, used for cost estimates and budgets');
+export type ModelPriceConfig = z.infer<typeof ModelPriceSchema>;
+
 export const ProviderConfigSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('anthropic'),
     apiKeyEnv: z.string().default('ANTHROPIC_API_KEY'),
     baseUrl: z.string().optional(),
+    pricing: ModelPriceSchema.optional().describe('Overrides the built-in price table'),
   }),
   z.object({
     type: z.literal('openai'),
     apiKeyEnv: z.string().default('OPENAI_API_KEY'),
     baseUrl: z.string().optional().describe('Any OpenAI-compatible endpoint'),
+    pricing: ModelPriceSchema.optional().describe('Needed for cost estimates and USD budgets'),
   }),
 ]);
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
@@ -140,7 +156,9 @@ export const ScheduleConfigSchema = z.object({
         .int()
         .positive()
         .default(3)
-        .describe('Run exploration on every Nth cycle; other cycles replay and mutate'),
+        .describe(
+          'Explore on the first cycle and then every N cycles; other cycles replay and mutate',
+        ),
       maxCycles: z.number().int().positive().optional(),
     })
     .prefault({}),

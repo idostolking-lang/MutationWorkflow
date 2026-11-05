@@ -3,6 +3,7 @@ import type { Logger } from '../../util/logger.js';
 import type { ModelProvider } from '../provider.js';
 import { AnthropicProvider } from './anthropic.js';
 import { OpenAIProvider } from './openai.js';
+import type { ModelPrice } from './pricing.js';
 
 export * from './anthropic.js';
 export * from './fake.js';
@@ -43,9 +44,29 @@ export function createProviders(
     providers.set(
       id,
       entry.type === 'anthropic'
-        ? new AnthropicProvider({ id, apiKey, baseUrl: entry.baseUrl })
-        : new OpenAIProvider({ id, apiKey, baseUrl: entry.baseUrl }),
+        ? new AnthropicProvider({
+            id,
+            apiKey,
+            baseUrl: entry.baseUrl,
+            pricing: toPrice(entry.pricing),
+          })
+        : new OpenAIProvider({
+            id,
+            apiKey,
+            baseUrl: entry.baseUrl,
+            pricing: toPrice(entry.pricing),
+          }),
     );
   }
   return providers;
+}
+
+function toPrice(pricing: Config['providers'][string]['pricing']): ModelPrice | undefined {
+  if (!pricing) return undefined;
+  return {
+    input: pricing.input,
+    output: pricing.output,
+    cacheRead: pricing.cacheRead ?? pricing.input * 0.1,
+    cacheWrite: pricing.cacheWrite,
+  };
 }

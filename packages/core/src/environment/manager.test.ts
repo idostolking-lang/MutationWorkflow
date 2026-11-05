@@ -183,6 +183,8 @@ describe('EnvironmentManager', () => {
       code: 'ENVIRONMENT_FAILED',
       message: expect.stringContaining('seed failed'),
     });
+    // Only one environment per target runs at a time; release it before starting the next.
+    await failing.stop();
 
     const slow = await start(target({ environment: { reset: { command: IDLE, timeoutMs: 300 } } }));
     await expect(slow.reset()).rejects.toThrow('did not finish within 300ms');

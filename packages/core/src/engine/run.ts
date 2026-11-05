@@ -13,7 +13,7 @@ import {
 } from '../schema/index.js';
 import type { RunStats, Store } from '../store/types.js';
 import type { Logger } from '../util/logger.js';
-import { mapWithConcurrency } from '../util/semaphore.js';
+import { mapWithConcurrency, Semaphore } from '../util/semaphore.js';
 import type { AdapterRegistry } from './adapters.js';
 import { executeWorkflow } from './executor.js';
 import { getGitContext } from './git.js';
@@ -71,6 +71,9 @@ export async function runWorkflows(deps: RunDeps, options: RunOptions): Promise<
   const runs: Run[] = [];
   const workflowsById = new Map<string, Workflow>();
   const touched = new Map<string, Finding>();
+  // Runs execute in parallel, but persistence is serial: two runs hitting the same problem must
+  // merge into one finding instead of racing on its fingerprint.
+  const persist = new Semaphore(1);
 
   for (const target of options.targets) {
     if (options.signal?.aborted) break;
@@ -104,15 +107,14 @@ export async function runWorkflows(deps: RunDeps, options: RunOptions): Promise<
           context: { jobId: options.jobId, ...git, baseUrl: env.baseUrl },
           logger: logger.child(`run:${workflow.id}`),
         });
-        await store.evidence.insertMany(evidence);
-        await store.runs.insert(run);
-        for (const finding of await recordFindings(
-          store,
-          { run, workflow, target, evidence },
-          logger,
-        )) {
-          touched.set(finding.id, finding);
-        }
+        // A run interrupted by a shutdown is not evidence of anything.
+        if (options.signal?.aborted) return;
+        await persist.use(async () => {
+          await store.evidence.insertMany(evidence);
+          await store.runs.insert(run);
+          const findings = await recordFindings(store, { run, workflow, target, evidence }, logger);
+          for (const finding of findings) touched.set(finding.id, finding);
+        });
         runs.push(run);
         done += 1;
         options.onRun?.(run, workflow, done, workflows.length);

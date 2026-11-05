@@ -1,0 +1,358 @@
+# Configuration
+
+MutationWorkflow reads one configuration file from the project root. It declares the
+applications to test (targets), how to start and reset them locally, which users to act as,
+what must always hold (invariants), where agents may go (scope), which models to use, and how
+mutation, execution, oracles, exploration and scheduling behave. Every section except `version`
+and `project` has defaults, so a minimal file is short. This page is the complete reference;
+values and defaults are taken from the configuration schema in
+`packages/core/src/config/schema.ts` and `packages/core/src/schema/target.ts`.
+
+Related: [README](../README.md) · [CLI](cli.md) · [Workflows](workflows.md) ·
+[Adapters](adapters.md) · [Agents](agents.md) · [Memory](memory.md)
+
+## File names and discovery
+
+The first of these files found in the working directory is used:
+
+1. `mutationworkflow.config.yaml`
+2. `mutationworkflow.config.yml`
+3. `mutationworkflow.config.json`
+
+All relative paths in the file (the store, evidence and reports directories, `cwd` of commands,
+`storageStatePath`) resolve against the directory that contains the config file. Target ids
+must be unique. Validation errors are reported with the failing path and stop the command
+(`CONFIG_INVALID`); a missing file is `CONFIG_NOT_FOUND`.
+
+## Environment variable interpolation
+
+Any string value may reference environment variables, so secrets and machine-specific values
+stay out of the committed file:
+
+| Syntax            | Result                                                      |
+| ----------------- | ----------------------------------------------------------- |
+| `${VAR}`          | Value of `VAR`; the config is invalid when `VAR` is not set |
+| `${VAR:-default}` | Value of `VAR`, or `default` when it is not set             |
+
+Names consist of letters, digits and `_`. Interpolation happens before validation and only
+inside strings: `port: ${PORT}` in YAML is a string, so use it where the schema expects a
+string (for example `environment.start.env`), not where it expects a number.
+
+## Complete example
+
+Two targets from the repository's examples: the `todo-web` app (a web target) and the
+`counter-cli` REPL (a cli target).
+
+```yaml
+version: 1
+
+project:
+  name: examples
+  description: Demo applications with planted sequence bugs
+
+targets:
+  - id: todo
+    name: Todo web app
+    description: Single-page todo list backed by a JSON API with in-memory state
+    kind: web # built-in Playwright adapter
+    options:
+      baseUrl: http://127.0.0.1:4173 # the example server binds 127.0.0.1
+      browser: chromium
+      headless: true
+    environment:
+      start:
+        command: node server.js
+        cwd: examples/todo-web
+        env:
+          PORT: "${TODO_PORT:-4173}" # env values are strings
+        ready:
+          url: http://127.0.0.1:4173/api/health
+          status: 200
+          timeoutMs: 30000
+      reset: # runs before each workflow when
+        command: curl -X POST http://127.0.0.1:4173/api/reset # execution.resetBetweenRuns is true
+    identities: []
+    invariants:
+      - id: api-healthy
+        description: The health endpoint still answers after the workflow
+        check: { type: http, url: /api/health, status: 200 }
+        when: after-workflow
+    scope:
+      denyText: ["delete account", "log ?out"] # case-insensitive regular expressions
+
+  - id: counter
+    name: Counter REPL
+    kind: cli # built-in process adapter
+    options:
+      command: node # an executable; use shell: true for "node cli.js"
+      args: [cli.js]
+      cwd: examples/counter-cli
+      promptPattern: "^> "
+
+agents:
+  maxParallel: 3
+  defaults:
+    model: claude-opus-5-5
+  roles:
+    triager: { effort: low }
+  budget:
+    maxUsdPerJob: 5
+
+mutations:
+  maxVariantsPerWorkflow: 25
+
+execution:
+  parallel: 2
+  screenshots: on-failure
+
+oracles:
+  ignoreSignals: ["favicon\\.ico"]
+```
+
+Without a `providers` section, providers are inferred from `ANTHROPIC_API_KEY` and
+`OPENAI_API_KEY` (see [Agents](agents.md)). Without any key, every deterministic command
+(replay, mutation by operators, oracles, reports) still works.
+
+## Field reference
+
+### Top level
+
+| Field         | Type   | Default                      | Meaning                               |
+| ------------- | ------ | ---------------------------- | ------------------------------------- |
+| `version`     | `1`    | required                     | Config format version                 |
+| `project`     | object | required                     | See below                             |
+| `targets`     | array  | `[]`                         | Applications under test               |
+| `providers`   | map    | `{}` (inferred from env)     | Model providers by id                 |
+| `agents`      | object | see below                    | Model settings, parallelism, budget   |
+| `mutations`   | object | see below                    | Mutation operators                    |
+| `execution`   | object | see below                    | Replay settings                       |
+| `oracles`     | object | see below                    | Oracle selection and signal filtering |
+| `exploration` | object | see below                    | Explorer agents                       |
+| `schedule`    | object | see below                    | Continuous mode and cron entries      |
+| `store.path`  | string | `.mutationworkflow/mw.db`    | SQLite database                       |
+| `evidenceDir` | string | `.mutationworkflow/evidence` | Screenshots, logs, DOM snapshots      |
+| `reportsDir`  | string | `.mutationworkflow/reports`  | Markdown run reports                  |
+
+### `project`
+
+| Field         | Type   | Default  | Meaning                       |
+| ------------- | ------ | -------- | ----------------------------- |
+| `name`        | string | required | Project name, non-empty       |
+| `description` | string | none     | Shown to agents and in status |
+
+### `targets[]`
+
+| Field         | Type   | Default    | Meaning                                                                      |
+| ------------- | ------ | ---------- | ---------------------------------------------------------------------------- |
+| `id`          | string | required   | Lowercase letters, digits, `-`, `_`; starts with a letter or digit           |
+| `name`        | string | none       | Display name                                                                 |
+| `description` | string | none       | What the application does, for the agents                                    |
+| `kind`        | string | required   | Adapter kind: `web`, `cli`, or a custom kind                                 |
+| `adapter`     | string | the `kind` | Adapter package to load, e.g. `my-adapter-package` ([Adapters](adapters.md)) |
+| `options`     | map    | `{}`       | Adapter options, validated by the adapter                                    |
+| `environment` | object | `{}`       | `start` and `reset` commands                                                 |
+| `identities`  | array  | `[]`       | Users workflows can act as                                                   |
+| `invariants`  | array  | `[]`       | Checks that must hold after any workflow                                     |
+| `scope`       | object | see below  | Boundaries for agents and replays                                            |
+
+Adapter options are documented in [Adapters](adapters.md): `baseUrl`, `browser`, `headless`,
+`viewport`, `launchOptions`, `storageStatePath` for `web`; `command`, `args`, `cwd`, `env`,
+`shell`, `promptPattern`, `exitTimeoutMs` for `cli`.
+
+### `targets[].environment`
+
+MutationWorkflow only tests an application it started itself, or one already running on
+localhost. Each replay, exploration and setup validation starts the environment, waits for it,
+and stops it (with its whole process group) at the end.
+
+| Field                    | Type                               | Default   | Meaning                                                           |
+| ------------------------ | ---------------------------------- | --------- | ----------------------------------------------------------------- |
+| `start`                  | object                             | none      | Starts the app; omit when it is already running                   |
+| `start.command`          | string                             | required  | Shell command                                                     |
+| `start.cwd`              | string                             | root      | Directory relative to the project root                            |
+| `start.env`              | map of string                      | `{}`      | Merged over the current environment                               |
+| `start.ready`            | object                             | required  | Ready check, below                                                |
+| `start.stopSignal`       | `SIGTERM` \| `SIGINT` \| `SIGKILL` | `SIGTERM` | Signal sent to stop the process group                             |
+| `start.stopTimeoutMs`    | integer                            | `10000`   | Wait before escalating to `SIGKILL`                               |
+| `reset`                  | object                             | none      | Restores a known state (reseed a database)                        |
+| `reset.command`          | string                             | required  | Shell command, must exit 0                                        |
+| `reset.cwd`, `reset.env` | as for `start`                     |           |                                                                   |
+| `reset.timeoutMs`        | integer                            | `60000`   | Killed and reported as failed after this                          |
+
+Ready check (`start.ready`): at least one of `url`, `port`, `output`. Every condition you give
+must hold at the same time; the check polls until then or until `timeoutMs`, and fails early
+when the process exits. `start` has no `timeoutMs` of its own: `ready.timeoutMs` bounds startup.
+
+| Field       | Type    | Default | Meaning                                                    |
+| ----------- | ------- | ------- | ---------------------------------------------------------- |
+| `url`       | string  | none    | Must answer; with `status`, with exactly that status       |
+| `status`    | integer | none    | Expected status for `url`; any status below 500 if omitted |
+| `port`      | integer | none    | TCP port on localhost that must accept connections         |
+| `output`    | string  | none    | Regular expression matched against the process output      |
+| `timeoutMs` | integer | `60000` | Startup deadline                                           |
+
+Without `start`, the engine probes `options.baseUrl` once and only warns when it does not
+answer. The `reset` command runs before every workflow only when `execution.resetBetweenRuns`
+is `true`; nothing else runs it.
+
+### `targets[].identities[]`
+
+| Field         | Type   | Default  | Meaning                                                   |
+| ------------- | ------ | -------- | --------------------------------------------------------- |
+| `id`          | string | required | Referenced by `workflow.identity`                         |
+| `description` | string | none     | Shown to agents                                           |
+| `steps`       | array  | `[]`     | Steps (action, note, expect) that log in or prepare state |
+
+Identity steps run before the workflow's own steps in the same session; any outcome other than
+`ok` makes the run an `error`. Example:
+
+```yaml
+identities:
+  - id: admin
+    steps:
+      - action: { type: navigate, url: /login }
+      - action: { type: fill, target: { label: Email }, value: admin@example.test }
+      - action: { type: fill, target: { label: Password }, value: "${ADMIN_PASSWORD}" }
+      - action: { type: click, target: { role: button, name: Sign in } }
+```
+
+### `targets[].invariants[]`
+
+| Field         | Type                             | Default          | Meaning                                   |
+| ------------- | -------------------------------- | ---------------- | ----------------------------------------- |
+| `id`          | string                           | required         | Identifier                                |
+| `description` | string                           | none             | Used in findings; falls back to `id`      |
+| `check`       | assertion                        | required         | Any assertion from the adapter vocabulary |
+| `when`        | `after-workflow` \| `after-step` | `after-workflow` | When to check                             |
+
+`after-step` invariants run after every step whose action succeeded; `after-workflow`
+invariants run once at the end, even when the workflow stopped early.
+
+### `targets[].scope`
+
+| Field       | Type     | Default | Meaning                                                                         |
+| ----------- | -------- | ------- | ------------------------------------------------------------------------------- |
+| `allowUrls` | string[] | `[]`    | URL globs that may be visited; empty means everything under the base URL origin |
+| `denyUrls`  | string[] | `[]`    | URL globs never visited                                                         |
+| `denyText`  | string[] | `[]`    | Case-insensitive regular expressions; matching controls are never activated     |
+
+Scope is enforced by the adapter, during exploration and replay alike. The built-in `web`
+adapter enforces all three; the `cli` adapter has no URLs or controls and ignores scope.
+
+### `providers`
+
+A map from a provider id of your choice to:
+
+| Field       | Type                    | Default                                | Meaning                                                     |
+| ----------- | ----------------------- | -------------------------------------- | ----------------------------------------------------------- |
+| `type`      | `anthropic` \| `openai` | required                               | API flavour                                                 |
+| `apiKeyEnv` | string                  | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Variable holding the key                                    |
+| `baseUrl`   | string                  | provider default                       | Custom endpoint; for `openai`, any OpenAI-compatible server |
+| `pricing`   | object                  | none                                   | USD per million tokens for cost estimates and USD budgets, below |
+
+A provider whose key variable is unset is skipped with a warning.
+
+`pricing` applies to every model used through that provider entry. For `anthropic` it overrides
+the built-in price table; for `openai` it is the only way to get cost estimates and therefore
+`maxUsdPerJob` budgets.
+
+| Field        | Type   | Default        | Meaning                     |
+| ------------ | ------ | -------------- | --------------------------- |
+| `input`      | number | required       | Uncached input tokens       |
+| `output`     | number | required       | Output tokens               |
+| `cacheRead`  | number | `input` × 0.1  | Cached input tokens read    |
+| `cacheWrite` | number | `input` × 1.25 | Input tokens written to cache |
+
+### `agents`
+
+| Field                    | Type    | Default | Meaning                                                     |
+| ------------------------ | ------- | ------- | ----------------------------------------------------------- |
+| `maxParallel`            | integer | `3`     | Concurrent model calls across all agents and sub-agents     |
+| `defaults`               | object  | `{}`    | Model settings for every role                               |
+| `roles.<role>`           | object  | none    | Overrides for `inspector`, `explorer`, `mutator`, `triager` |
+| `budget.maxTokensPerJob` | integer | none    | Stop agents in a job after this many input + output tokens  |
+| `budget.maxUsdPerJob`    | number  | none    | Stop agents in a job after this estimated cost              |
+
+Model settings (in `defaults` and each role; role values win field by field):
+
+| Field       | Type                                            | Default                                                             | Meaning                       |
+| ----------- | ----------------------------------------------- | ------------------------------------------------------------------- | ----------------------------- |
+| `provider`  | string                                          | an `anthropic` provider, else the first                             | Provider id                   |
+| `model`     | string                                          | provider default (`claude-opus-5-5` for Anthropic; none for OpenAI) | Model id                      |
+| `effort`    | `low` \| `medium` \| `high` \| `xhigh` \| `max` | none                                                                | Reasoning effort              |
+| `maxTurns`  | integer                                         | `60`                                                                | Model calls per agent run     |
+| `maxTokens` | integer                                         | `16000`                                                             | Output tokens per call        |
+| `vision`    | boolean                                         | provider capability                                                 | Send screenshots to the model |
+
+### `mutations`
+
+| Field                    | Type     | Default                      | Meaning                                     |
+| ------------------------ | -------- | ---------------------------- | ------------------------------------------- |
+| `operators`              | string[] | all nine built-ins, in order | Operator ids, applied in the given order    |
+| `maxVariantsPerWorkflow` | integer  | `25`                         | Total variants per base workflow; existing ones count |
+| `fuzzValues`             | string[] | built-in boundary set        | Replacement values for `data-fuzz`          |
+
+Built-in ids: `skip-step`, `reorder-steps`, `repeat-step`, `truncate`, `data-fuzz`,
+`interrupt`, `timing`, `role-swap`, `interleave`. See [Mutations](mutations.md).
+
+### `execution`
+
+| Field                | Type                                | Default      | Meaning                                                                      |
+| -------------------- | ----------------------------------- | ------------ | ---------------------------------------------------------------------------- |
+| `parallel`           | integer                             | `2`          | Concurrent workflow replays per target                                       |
+| `stepTimeoutMs`      | integer                             | `15000`      | Time an action may take (finding a control, navigating)                      |
+| `assertionTimeoutMs` | integer                             | `5000`       | How long an assertion may retry before it fails                              |
+| `workflowTimeoutMs`  | integer                             | `180000`     | Checked between steps; remaining steps are skipped and the run is an `error` |
+| `screenshots`        | `always` \| `on-failure` \| `never` | `on-failure` | When adapters capture screenshots                                            |
+| `resetBetweenRuns`   | boolean                             | `false`      | Run `environment.reset` before every workflow; forces `parallel` to 1        |
+
+### `oracles`
+
+| Field               | Type     | Default  | Meaning                                                           |
+| ------------------- | -------- | -------- | ----------------------------------------------------------------- |
+| `enabled`           | string[] | all four | `step-failure`, `app-error`, `assertions`, `invariants`           |
+| `ignoreSignalKinds` | string[] | `[]`     | Signal kinds the `app-error` oracle ignores                       |
+| `ignoreSignals`     | string[] | `[]`     | Case-insensitive regular expressions on signal messages to ignore |
+| `httpErrorStatus`   | integer  | `500`    | `http-error` signals below this status are ignored                |
+
+Signal kinds: `console-error`, `uncaught-exception`, `network-error`, `http-error`,
+`error-page`, `stderr`, `process-exit`, `crash`. See [Oracles](oracles.md).
+
+### `exploration`
+
+| Field                 | Type     | Default | Meaning                                               |
+| --------------------- | -------- | ------- | ----------------------------------------------------- |
+| `maxWorkflows`        | integer  | `10`    | New workflows per exploration session (all explorers) |
+| `maxStepsPerWorkflow` | integer  | `25`    | Longest journey an explorer may record                |
+| `parallelExplorers`   | integer  | `2`     | Explorer agents, capped at `maxWorkflows`             |
+| `focus`               | string[] | `[]`    | Areas to prioritise, distributed across explorers     |
+
+### `schedule`
+
+| Field                           | Type                                      | Default   | Meaning                                                |
+| ------------------------------- | ----------------------------------------- | --------- | ------------------------------------------------------ |
+| `continuous.idleMs`             | integer                                   | `600000`  | Pause between cycles in continuous mode                |
+| `continuous.exploreEveryCycles` | integer                                   | `3`       | Explore on the first cycle, then every N cycles (needs a provider) |
+| `continuous.maxCycles`          | integer                                   | unlimited | Stop after this many cycles                            |
+| `cron[].expression`             | string                                    | required  | Cron expression                                        |
+| `cron[].action`                 | `run` \| `explore` \| `mutate` \| `cycle` | `cycle`   | What to do                                             |
+| `cron[].target`                 | string                                    | all       | Restrict to one target id                              |
+
+A continuous cycle explores (on exploration cycles), mutates every target, then replays
+everything. See [CLI](cli.md) for the commands that use these settings.
+
+## Where files live
+
+With the defaults, everything MutationWorkflow writes is under `.mutationworkflow/` next to
+the config file:
+
+```text
+.mutationworkflow/
+  mw.db                     # SQLite memory (plus mw.db-wal / mw.db-shm while open)
+  evidence/runs/<runId>/    # evidence of each replay
+  evidence/explore/<sessionId>/  # evidence of each explorer session
+  reports/                  # <timestamp>-run.md reports
+  setup-proposal.yaml       # written by setup when a config already exists
+```
+
+Add `.mutationworkflow/` to `.gitignore`. See [Memory](memory.md) for backups and cleanup.

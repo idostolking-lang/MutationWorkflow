@@ -81,8 +81,11 @@ export async function mutate(deps: MutateDeps, options: MutateOptions = {}): Pro
   let fromOperators = 0;
 
   for (const base of bases) {
+    // The cap is per base workflow in total, not per call, so repeated runs converge.
+    const remaining = maxVariants - (await store.workflows.count({ parentId: base.id }));
+    if (remaining <= 0) continue;
     const variants = generateVariants(base, operators, context, {
-      maxVariants,
+      maxVariants: remaining,
       existingFingerprints: existing,
     });
     for (const variant of variants) {
@@ -123,6 +126,7 @@ async function agentVariants(
   const siblings = await store.workflows.list({ parentId: base.id });
   const result = await runtime.run({
     role: 'mutator',
+    delegate: false,
     system: mutatorPrompt({
       target,
       adapter: description,
@@ -152,12 +156,13 @@ async function agentVariants(
         title: `${base.title} (${proposal.titleSuffix})`,
         intent: base.intent,
         steps,
-        expect: proposal.expect ?? base.expect,
+        expect: proposal.expect ?? [],
         identity: base.identity,
         tags: [...new Set([...base.tags, 'mutation', 'agent'])],
       },
       {
         origin: 'mutation',
+        status: base.status,
         parentId: base.id,
         mutation: { operator: 'agent', description: proposal.description },
       },

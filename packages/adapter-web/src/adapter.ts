@@ -93,6 +93,11 @@ export class WebAdapter implements Adapter {
       const { browser: name, headless, launchOptions } = this.options;
       this.logger.debug('Launching browser', { browser: name, headless });
       const launching = BROWSERS[name].launch({
+        // The CLI owns signal handling: Playwright's defaults would exit the process (SIGINT)
+        // or close the browser mid-run (SIGTERM) before the engine can finish cleanly.
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false,
         ...(launchOptions as LaunchOptions),
         headless,
       });

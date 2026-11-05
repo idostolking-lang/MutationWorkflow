@@ -11,6 +11,7 @@ import type {
   TokenUsage,
   ToolSpec,
 } from '../provider.js';
+import { estimateCost, type ModelPrice } from './pricing.js';
 
 export interface OpenAIProviderOptions {
   id?: string;
@@ -18,6 +19,8 @@ export interface OpenAIProviderOptions {
   /** Any OpenAI-compatible endpoint (OpenAI, Azure, OpenRouter, Ollama, vLLM, ...). */
   baseUrl?: string;
   supportsVision?: boolean;
+  /** Prices vary by vendor, so cost estimates need an explicit table. */
+  pricing?: ModelPrice;
 }
 
 /**
@@ -30,9 +33,11 @@ export class OpenAIProvider implements ModelProvider {
   readonly supportsVision: boolean;
   readonly defaultModel = undefined;
   private readonly client: OpenAI;
+  private readonly pricing: ModelPrice | undefined;
 
   constructor(options: OpenAIProviderOptions = {}) {
     this.id = options.id ?? 'openai';
+    this.pricing = options.pricing;
     this.supportsVision = options.supportsVision ?? true;
     this.client = new OpenAI({
       apiKey: options.apiKey,
@@ -72,7 +77,10 @@ export class OpenAIProvider implements ModelProvider {
       message: { role: 'assistant', content },
       stopReason: mapFinishReason(choice.finish_reason),
       usage: {
-        inputTokens: completion.usage?.prompt_tokens ?? 0,
+        // Report uncached input like the Anthropic provider does, so budgets mean the same thing.
+        inputTokens:
+          (completion.usage?.prompt_tokens ?? 0) -
+          (completion.usage?.prompt_tokens_details?.cached_tokens ?? 0),
         outputTokens: completion.usage?.completion_tokens ?? 0,
         cacheReadTokens: completion.usage?.prompt_tokens_details?.cached_tokens ?? 0,
         cacheWriteTokens: 0,
@@ -81,8 +89,8 @@ export class OpenAIProvider implements ModelProvider {
     };
   }
 
-  estimateCostUsd(_model: string, _usage: TokenUsage): number | undefined {
-    return undefined;
+  estimateCostUsd(_model: string, usage: TokenUsage): number | undefined {
+    return this.pricing ? estimateCost(this.pricing, usage) : undefined;
   }
 }
 

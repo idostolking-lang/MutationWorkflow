@@ -108,7 +108,7 @@ export function generateVariants(
           },
           {
             origin: 'mutation',
-            status: workflow.status === 'archived' ? 'archived' : 'active',
+            status: workflow.status,
             parentId: workflow.id,
             mutation: {
               operator: queue.operator.id,

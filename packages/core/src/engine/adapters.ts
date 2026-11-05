@@ -94,6 +94,13 @@ export class AdapterRegistry {
   }
 
   private async importPackage(name: string): Promise<AdapterModule | { default: AdapterModule }> {
+    try {
+      // Works for flat node_modules layouts (npm, yarn) and hoisted pnpm installs.
+      return (await import(name)) as AdapterModule | { default: AdapterModule };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') throw error;
+    }
+    // Resolve from the project under test, where third-party adapters are installed.
     const require = createRequire(`${this.options.rootDir}/`);
     const resolved = require.resolve(name);
     return (await import(pathToFileURL(resolved).href)) as

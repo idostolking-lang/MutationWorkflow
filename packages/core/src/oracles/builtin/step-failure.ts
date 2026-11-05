@@ -1,4 +1,4 @@
-import type { OracleResult } from '../../schema/index.js';
+import { fingerprint, type OracleResult } from '../../schema/index.js';
 import type { Oracle, OracleContext } from '../types.js';
 
 /**
@@ -15,7 +15,10 @@ export const stepFailureOracle: Oracle = {
     }
     const results: OracleResult[] = [];
     for (const step of context.steps) {
-      if (step.status === 'passed' || step.status === 'skipped') continue;
+      // Failed expectations are reported by the assertions oracle; this one covers steps that
+      // could not be performed at all.
+      if (step.status === 'passed' || step.status === 'skipped' || step.status === 'failed')
+        continue;
       if (context.mutated && step.status === 'blocked') {
         results.push({
           oracle: 'step-failure',
@@ -24,12 +27,14 @@ export const stepFailureOracle: Oracle = {
         });
         continue;
       }
-      const action = context.workflow.steps[step.index]?.action.type ?? 'unknown';
+      const stepAction = context.workflow.steps[step.index]?.action;
+      const action = stepAction?.type ?? 'unknown';
       results.push({
         oracle: 'step-failure',
         verdict: 'fail',
         severity: context.mutated ? 'medium' : 'high',
-        signature: `step-failure:${step.status}:${action}:${step.index}`,
+        // Hash the action rather than its position: indices shift between variants of a base.
+        signature: `step-failure:${step.status}:${fingerprint(stepAction ?? action)}`,
         summary: `Step ${step.index + 1} (${action}) ${step.status}: ${step.message ?? 'no detail'}`,
         details: { stepId: step.stepId, status: step.status },
       });
