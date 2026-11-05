@@ -69,7 +69,7 @@ export function requireAgents(engine: Engine, action: string): void {
   if (engine.agents.enabled) return;
   throw new MutationWorkflowError(
     'PROVIDER_NOT_CONFIGURED',
-    `"${action}" needs a model provider. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add a providers section to the config.`,
+    `"${action}" needs a model provider. Install Claude Code or Codex, set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add a providers section to the config.`,
   );
 }
 

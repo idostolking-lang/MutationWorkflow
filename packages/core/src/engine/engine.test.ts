@@ -194,6 +194,7 @@ describe('Engine', () => {
       mutations: { maxVariantsPerWorkflow: 40 },
       execution: { screenshots: 'never' },
       schedule: { continuous: { idleMs: 0 } },
+      agents: { defaults: { model: 'fake-model' } },
     });
     const engine = await Engine.create({
       config: resolveConfig(

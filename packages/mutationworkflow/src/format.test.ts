@@ -7,7 +7,7 @@ import {
   WorkflowSchema,
 } from '@mutationworkflow/core';
 import { describe, expect, it } from 'vitest';
-import { apiKeyChecks, formatCheck, nodeVersionOk } from './commands/doctor.js';
+import { formatCheck, nodeVersionOk, providerChecks } from './commands/doctor.js';
 import { describeError } from './errors.js';
 import {
   compactNumber,
@@ -148,7 +148,9 @@ describe('errors and doctor', () => {
   it('explains missing providers per surface', () => {
     const error = new MutationWorkflowError('PROVIDER_NOT_CONFIGURED', 'needs a provider');
     expect(describeError(error, 'mcp')).toContain('claude mcp add mutationworkflow');
-    expect(describeError(error, 'cli')).toContain('Export ANTHROPIC_API_KEY');
+    expect(describeError(error, 'cli')).toContain(
+      'Install Claude Code or Codex, export ANTHROPIC_API_KEY',
+    );
     expect(describeError(new Error('plain'), 'cli')).toBe('plain');
   });
 
@@ -160,16 +162,16 @@ describe('errors and doctor', () => {
 
   it('checks API keys without printing them', () => {
     const config = parseConfig({ version: 1, project: { name: 'p' } });
-    const [found] = apiKeyChecks(config, { ANTHROPIC_API_KEY: 'sk-secret' });
+    const [found] = providerChecks(config, { ANTHROPIC_API_KEY: 'sk-secret' });
     expect(found?.state).toBe('ok');
     expect(JSON.stringify(found)).not.toContain('sk-secret');
-    expect(apiKeyChecks(config, {})[0]?.state).toBe('warn');
+    expect(providerChecks(config, {})[0]?.state).toBe('warn');
     const configured = parseConfig({
       version: 1,
       project: { name: 'p' },
       providers: { main: { type: 'openai', apiKeyEnv: 'MY_KEY' } },
     });
-    expect(apiKeyChecks(configured, {})[0]).toMatchObject({
+    expect(providerChecks(configured, {})[0]).toMatchObject({
       state: 'fail',
       label: 'Provider main',
     });

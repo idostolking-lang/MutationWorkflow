@@ -33,7 +33,12 @@ export type Effort = z.infer<typeof EffortSchema>;
 
 export const ModelSettingsSchema = z.object({
   provider: z.string().optional().describe('Provider id from the providers map'),
-  model: z.string().optional().describe('Model id understood by the provider'),
+  model: z
+    .string()
+    .optional()
+    .describe(
+      'Model to use. Required for API providers (the id they accept); optional for coding-agent drivers, whose own setting applies when omitted',
+    ),
   effort: EffortSchema.optional().describe('Reasoning effort, when the provider supports it'),
   maxTurns: z.number().int().positive().optional().describe('Maximum model calls per agent run'),
   maxTokens: z.number().int().positive().optional().describe('Maximum output tokens per call'),
@@ -86,6 +91,20 @@ export const ProviderConfigSchema = z.discriminatedUnion('type', [
     baseUrl: z.string().optional().describe('Any OpenAI-compatible endpoint'),
     pricing: ModelPriceSchema.optional().describe('Needed for cost estimates and USD budgets'),
   }),
+  z
+    .object({
+      type: z.literal('claude-code'),
+      command: z.string().default('claude').describe('Claude Code executable'),
+      args: z.array(z.string()).default([]).describe('Extra arguments for every invocation'),
+    })
+    .describe('Run agents through your Claude Code installation and subscription; no API key'),
+  z
+    .object({
+      type: z.literal('codex'),
+      command: z.string().default('codex').describe('Codex CLI executable'),
+      args: z.array(z.string()).default([]).describe('Extra arguments for every invocation'),
+    })
+    .describe('Run agents through your Codex CLI installation and subscription; no API key'),
 ]);
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 

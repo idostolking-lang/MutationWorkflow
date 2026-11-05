@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import type { AgentRole } from '../config/schema.js';
+import { errorMessage } from '../util/errors.js';
 import type { Logger } from '../util/logger.js';
+import { truncate } from '../util/text.js';
 import type { ImagePart, TextPart, ToolSpec } from './provider.js';
 
 export interface ToolContext {
@@ -46,3 +48,53 @@ export function toToolSpec(tool: AgentTool): ToolSpec {
 
 export const ok = (content: ToolOutput['content']): ToolOutput => ({ content });
 export const fail = (text: string): ToolOutput => ({ content: text, isError: true });
+
+const MAX_TOOL_OUTPUT_CHARS = 40_000;
+
+/**
+ * Run a tool by name with validation and error capture. Shared by the in-process runtime, the
+ * MCP tool servers that expose tools to external agent runtimes, and the MCP server that lets a
+ * connected coding agent drive sessions itself. Never throws: problems become error outputs the
+ * model can read.
+ */
+export async function runTool(
+  tools: ReadonlyArray<AgentTool>,
+  name: string,
+  input: unknown,
+  context: ToolContext,
+): Promise<ToolOutput> {
+  const tool = tools.find((candidate) => candidate.name === name);
+  if (!tool) {
+    return fail(`Unknown tool "${name}". Available: ${tools.map((t) => t.name).join(', ')}`);
+  }
+  const parsed = tool.schema.safeParse(input);
+  if (!parsed.success) {
+    return fail(`Invalid input for ${tool.name}:\n${z.prettifyError(parsed.error)}`);
+  }
+  try {
+    return normalizeToolOutput(await tool.execute(parsed.data, context));
+  } catch (error) {
+    return fail(`${tool.name} failed: ${errorMessage(error)}`);
+  }
+}
+
+/** Always an array of parts, with oversized text cut so one tool cannot flood the context. */
+export function normalizeToolOutput(
+  output: ToolOutput,
+): ToolOutput & { content: Array<TextPart | ImagePart> } {
+  const parts: Array<TextPart | ImagePart> =
+    typeof output.content === 'string' ? [{ type: 'text', text: output.content }] : output.content;
+  const normalized = parts.map((part) =>
+    part.type === 'text' ? { ...part, text: truncate(part.text, MAX_TOOL_OUTPUT_CHARS) } : part,
+  );
+  return {
+    content: normalized.length > 0 ? normalized : [{ type: 'text', text: '(no output)' }],
+    isError: output.isError,
+  };
+}
+
+/** Text of a tool output, for logs and for runtimes that cannot carry images. */
+export function toolOutputText(output: ToolOutput): string {
+  if (typeof output.content === 'string') return output.content;
+  return output.content.map((part) => (part.type === 'text' ? part.text : '[image]')).join('\n');
+}

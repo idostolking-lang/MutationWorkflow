@@ -1,4 +1,6 @@
-import type { Effort } from '../config/schema.js';
+import type { AgentRole, Effort } from '../config/schema.js';
+import type { Logger } from '../util/logger.js';
+import type { AgentTool, ToolContext } from './tools.js';
 
 export interface TextPart {
   type: 'text';
@@ -67,16 +69,62 @@ export interface CompletionResponse {
   model: string;
 }
 
-/** A model API. Implementations exist for Anthropic, OpenAI-compatible endpoints and tests. */
+/**
+ * A model API called one turn at a time; MutationWorkflow runs the tool loop. The model id is
+ * always chosen by the user in the configuration: there is no default.
+ */
 export interface ModelProvider {
+  readonly kind: 'model';
   readonly id: string;
   readonly type: string;
   readonly supportsVision: boolean;
-  /** Model used when a role does not name one; undefined means the user must choose. */
-  readonly defaultModel: string | undefined;
   complete(request: CompletionRequest): Promise<CompletionResponse>;
   /** Approximate cost in USD, when the provider knows the model's prices. */
   estimateCostUsd(model: string, usage: TokenUsage): number | undefined;
+}
+
+export interface AgentDriveRequest {
+  role: AgentRole;
+  system: string;
+  task: string;
+  /** Tools the agent may call, served to the external runtime over MCP. */
+  tools: AgentTool[];
+  toolContext: ToolContext;
+  /** Model name as the external runtime understands it; its own setting applies when absent. */
+  model?: string;
+  maxTurns: number;
+  signal?: AbortSignal;
+  logger: Logger;
+}
+
+export interface AgentDriveResult {
+  /** The agent's final answer. */
+  text: string;
+  usage: TokenUsage;
+  costUsd?: number;
+  turns: number;
+  stoppedBecause: 'finished' | 'max-turns' | 'error' | 'aborted';
+  error?: string;
+  /** Model the external runtime reports having used, when it says. */
+  model?: string;
+}
+
+/**
+ * An external agent runtime that runs a whole task itself: a coding agent's command line such
+ * as Claude Code or Codex, using the user's own installation and subscription. MutationWorkflow
+ * hands it the system prompt, the task and its tools (over MCP) and reads the final answer.
+ */
+export interface AgentDriver {
+  readonly kind: 'driver';
+  readonly id: string;
+  readonly type: string;
+  drive(request: AgentDriveRequest): Promise<AgentDriveResult>;
+}
+
+export type Provider = ModelProvider | AgentDriver;
+
+export function isDriver(provider: Provider): provider is AgentDriver {
+  return provider.kind === 'driver';
 }
 
 export function textOf(message: AgentMessage): string {

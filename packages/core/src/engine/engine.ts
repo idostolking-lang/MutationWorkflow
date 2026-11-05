@@ -622,7 +622,11 @@ export class Engine {
   private buildAgents(config: Config): AgentRuntime {
     const providers =
       this.options.providers ??
-      createProviders(config, { env: this.options.env, logger: this.logger });
+      createProviders(config, {
+        env: this.options.env,
+        logger: this.logger,
+        rootDir: this.rootDir,
+      });
     return new AgentRuntime({
       providers,
       config: config.agents,

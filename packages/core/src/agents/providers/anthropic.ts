@@ -24,12 +24,13 @@ export interface AnthropicProviderOptions {
 /**
  * Anthropic Messages API. Requests stream so long tool-heavy turns never hit HTTP timeouts, and
  * the whole prompt prefix is cached automatically, which makes multi-turn agent loops cheap.
+ * The model is whatever the configuration names; nothing is assumed.
  */
 export class AnthropicProvider implements ModelProvider {
+  readonly kind = 'model';
   readonly id: string;
   readonly type = 'anthropic';
   readonly supportsVision = true;
-  readonly defaultModel = 'claude-opus-5-5';
   private readonly client: Anthropic;
   private readonly pricing: ModelPrice | undefined;
 

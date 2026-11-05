@@ -29,7 +29,7 @@ export type Surface = 'cli' | 'mcp';
 const MCP_KEY_HINT =
   'Pass a key to the MCP server, e.g. `claude mcp add mutationworkflow -e ANTHROPIC_API_KEY=... -- npx -y mutationworkflow mcp` (or set OPENAI_API_KEY), then restart the server.';
 const CLI_KEY_HINT =
-  'Export ANTHROPIC_API_KEY or OPENAI_API_KEY (or configure `providers` in the config) and retry.';
+  'Install Claude Code or Codex, export ANTHROPIC_API_KEY or OPENAI_API_KEY, or configure `providers` in the config, and retry.';
 
 /** A friendly, actionable message for any error, keyed on MutationWorkflowError codes. */
 export function describeError(error: unknown, surface: Surface): string {

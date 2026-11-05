@@ -227,7 +227,13 @@ async function triageBatch(deps: TriageDeps, batch: Finding[]): Promise<Finding[
     );
     return [];
   }
-  return applyDecisions(store, batch, result.output as TriageDecision, resolved.model, logger);
+  return applyDecisions(
+    store,
+    batch,
+    result.output as TriageDecision,
+    resolved.model ?? resolved.provider.id,
+    logger,
+  );
 }
 
 async function dossier(store: Store, finding: Finding): Promise<string> {
@@ -255,9 +261,10 @@ async function dossier(store: Store, finding: Finding): Promise<string> {
       `Workflow "${workflow.title}" (${workflow.origin}, ${confirmed}): ${workflow.intent}`,
     );
     if (workflow.mutation) lines.push(`Mutation: ${workflow.mutation.description}`);
-    if (workflow.parentId) {
-      const base = await store.workflows.get(workflow.parentId);
-      const baseRun = await store.runs.latestForWorkflow(workflow.parentId);
+    const parentId = workflow.parentId;
+    if (parentId) {
+      const base = await store.workflows.get(parentId);
+      const baseRun = await store.runs.latestForWorkflow(parentId);
       if (base) {
         lines.push(
           `Base workflow "${base.title}" last ran ${baseRun ? `${baseRun.status} on ${baseRun.finishedAt}` : 'never'}; ${

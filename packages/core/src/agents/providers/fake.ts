@@ -10,16 +10,16 @@ import type {
 export type FakeScript = (
   request: CompletionRequest,
   call: number,
-) => CompletionResponse | AgentMessage;
+) => CompletionResponse | AgentMessage | Promise<CompletionResponse | AgentMessage>;
 
 /**
  * Scripted provider for tests and dry runs. The script receives every request and returns
  * either a full response or just an assistant message (stop reason inferred from its content).
  */
 export class FakeProvider implements ModelProvider {
+  readonly kind = 'model';
   readonly type = 'fake';
   readonly supportsVision = true;
-  readonly defaultModel = 'fake-model';
   readonly requests: CompletionRequest[] = [];
   private calls = 0;
 

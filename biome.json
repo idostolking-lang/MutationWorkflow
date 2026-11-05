@@ -67,6 +67,16 @@
           }
         }
       }
+    },
+    {
+      "includes": ["**/__fixtures__/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noConsole": "off"
+          }
+        }
+      }
     }
   ]
 }

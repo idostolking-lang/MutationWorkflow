@@ -6,6 +6,7 @@ import {
   type Config,
   Engine,
   errorMessage,
+  findExecutable,
   type ResolvedConfig,
   silentLogger,
 } from '@mutationworkflow/core';
@@ -33,26 +34,46 @@ export function nodeVersionOk(version: string, minimum: readonly [number, number
 }
 
 /** API-key checks for configured providers, or for the inferred ones when none are configured. */
-export function apiKeyChecks(config: Config, env: NodeJS.ProcessEnv): Check[] {
+/** Which model providers can be used: API keys for API providers, installed CLIs for drivers. */
+export function providerChecks(config: Config, env: NodeJS.ProcessEnv): Check[] {
   const entries = Object.entries(config.providers);
   if (entries.length === 0) {
-    const present = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'].filter((name) => env[name]);
+    const available = [
+      ...['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']
+        .filter((name) => env[name])
+        .map((name) => `${name} set`),
+      ...(findExecutable('claude', env) ? ['Claude Code CLI installed'] : []),
+      ...(findExecutable('codex', env) ? ['Codex CLI installed'] : []),
+    ];
     return [
-      present.length > 0
-        ? { state: 'ok', label: 'Model provider', detail: `${present.join(', ')} set` }
+      available.length > 0
+        ? { state: 'ok', label: 'Model provider', detail: available.join(', ') }
         : {
             state: 'warn',
             label: 'Model provider',
             detail:
-              'no ANTHROPIC_API_KEY or OPENAI_API_KEY; setup, explore, triage and mutate --agent are unavailable',
+              'none available: install Claude Code or Codex, or set ANTHROPIC_API_KEY or OPENAI_API_KEY; setup, explore, triage and mutate --agent are unavailable',
           },
     ];
   }
-  return entries.map(([id, provider]) =>
-    env[provider.apiKeyEnv]
-      ? { state: 'ok', label: `Provider ${id}`, detail: `${provider.apiKeyEnv} set` }
-      : { state: 'fail', label: `Provider ${id}`, detail: `${provider.apiKeyEnv} is not set` },
-  );
+  return entries.map(([id, provider]): Check => {
+    if (provider.type === 'anthropic' || provider.type === 'openai') {
+      return env[provider.apiKeyEnv]
+        ? { state: 'ok', label: `Provider ${id}`, detail: `${provider.apiKeyEnv} set` }
+        : { state: 'fail', label: `Provider ${id}`, detail: `${provider.apiKeyEnv} is not set` };
+    }
+    const isPath = provider.command.includes('/') || provider.command.includes('\\');
+    const found = isPath
+      ? existsSync(provider.command)
+      : Boolean(findExecutable(provider.command, env));
+    return found
+      ? { state: 'ok', label: `Provider ${id}`, detail: `${provider.command} found` }
+      : {
+          state: 'fail',
+          label: `Provider ${id}`,
+          detail: `${provider.command} is not installed or not on PATH`,
+        };
+  });
 }
 
 /** Resolve and load Playwright the way the web adapter would: from the project, then from it. */
@@ -186,7 +207,7 @@ export async function runDoctor(options: {
   if (config.targets.some((t) => (t.adapter ?? t.kind) === 'web')) {
     checks.push(await playwrightCheck(resolved.rootDir));
   }
-  checks.push(...apiKeyChecks(config, options.env));
+  checks.push(...providerChecks(config, options.env));
   return checks;
 }
 

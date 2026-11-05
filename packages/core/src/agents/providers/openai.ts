@@ -25,20 +25,20 @@ export interface OpenAIProviderOptions {
 
 /**
  * Chat Completions with function calling, which is the most widely implemented surface across
- * OpenAI-compatible servers. Prices vary by vendor, so no cost estimate is produced.
+ * OpenAI-compatible servers. The model is whatever the configuration names.
  */
 export class OpenAIProvider implements ModelProvider {
+  readonly kind = 'model';
   readonly id: string;
   readonly type = 'openai';
   readonly supportsVision: boolean;
-  readonly defaultModel = undefined;
   private readonly client: OpenAI;
   private readonly pricing: ModelPrice | undefined;
 
   constructor(options: OpenAIProviderOptions = {}) {
     this.id = options.id ?? 'openai';
-    this.pricing = options.pricing;
     this.supportsVision = options.supportsVision ?? true;
+    this.pricing = options.pricing;
     this.client = new OpenAI({
       apiKey: options.apiKey,
       ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),

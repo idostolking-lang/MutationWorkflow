@@ -116,7 +116,9 @@ export function formatStatus(status: StatusSummary): string {
     const models = Object.entries(agents.models).map(([role, model]) => `${role}=${model}`);
     if (models.length > 0) lines.push(`models: ${models.join(', ')}`);
   } else {
-    lines.push('agents: disabled (set ANTHROPIC_API_KEY or OPENAI_API_KEY)');
+    lines.push(
+      'agents: disabled (install Claude Code or Codex, or set ANTHROPIC_API_KEY or OPENAI_API_KEY)',
+    );
   }
   lines.push(`usage: ${formatUsage(status.usage)}`);
   if (status.openQuestions > 0) {

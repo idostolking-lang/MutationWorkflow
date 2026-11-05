@@ -9,10 +9,11 @@ import { truncate } from '../util/text.js';
 import {
   type AgentMessage,
   addUsage,
-  type ContentPart,
   emptyUsage,
   type ImagePart,
+  isDriver,
   type ModelProvider,
+  type Provider,
   type TextPart,
   type TokenUsage,
   type ToolResultPart,
@@ -20,18 +21,13 @@ import {
   textOf,
   toolUsesOf,
 } from './provider.js';
-import {
-  type AgentTool,
-  defineTool,
-  type ToolContext,
-  type ToolOutput,
-  toToolSpec,
-} from './tools.js';
+import { type AgentTool, defineTool, runTool, type ToolContext, toToolSpec } from './tools.js';
 
-/** Fully resolved model settings for one role. */
+/** Fully resolved settings for one role: which provider, which model, how long it may run. */
 export interface ResolvedModel {
-  provider: ModelProvider;
-  model: string;
+  provider: Provider;
+  /** Required for model providers; optional for drivers, whose own setting applies when absent. */
+  model: string | undefined;
   maxTurns: number;
   maxTokens: number;
   effort?: Effort;
@@ -75,7 +71,7 @@ export interface AgentRunResult<T> {
 }
 
 export interface AgentRuntimeOptions {
-  providers: ReadonlyMap<string, ModelProvider>;
+  providers: ReadonlyMap<string, Provider>;
   config: AgentsConfig;
   store?: Store;
   logger: Logger;
@@ -83,7 +79,11 @@ export interface AgentRuntimeOptions {
 
 const DEFAULTS = { maxTurns: 60, maxTokens: 16_000 } as const;
 const MAX_DELEGATION_DEPTH = 2;
-const MAX_TOOL_OUTPUT_CHARS = 40_000;
+const MAX_IMAGES_IN_CONTEXT = 2;
+const OMITTED_IMAGE: TextPart = {
+  type: 'text',
+  text: '[earlier screenshot omitted to save context]',
+};
 
 interface JobSpend {
   usage: TokenUsage;
@@ -91,10 +91,11 @@ interface JobSpend {
 }
 
 /**
- * Runs agents: a model, a system prompt, a task and a set of tools, looped until the model
- * stops calling tools or calls `finish`. One semaphore caps concurrent model calls across every
- * agent and sub-agent, which is what "use up to 3 agents at a time" means in practice. Agents
- * can fan out through the `delegate` tool; a waiting parent holds no permit.
+ * Runs agents. With a model provider the runtime owns the loop: a system prompt, a task and a
+ * set of tools, called turn by turn until the model stops calling tools or calls `finish`. With
+ * a driver (a coding agent's command line) the whole task is handed over and the driver runs it
+ * with its own loop, calling the same tools over MCP. One semaphore caps concurrent work across
+ * every agent and sub-agent, which is what "use up to 3 agents at a time" means in practice.
  */
 export class AgentRuntime {
   readonly slots: Semaphore;
@@ -104,30 +105,29 @@ export class AgentRuntime {
     this.slots = new Semaphore(options.config.maxParallel);
   }
 
-  /** Merge role settings over defaults and pick the provider and model. */
+  /** True when at least one provider is available, i.e. agents can run at all. */
+  get enabled(): boolean {
+    return this.options.providers.size > 0;
+  }
+
+  /** Merge role settings over defaults and pick the provider and model. Never guesses a model. */
   resolveModel(role: AgentRole): ResolvedModel {
     const settings = { ...this.options.config.defaults, ...this.options.config.roles[role] };
     const provider = this.pickProvider(settings.provider);
-    const model = settings.model ?? provider.defaultModel;
-    if (!model) {
+    if (!isDriver(provider) && !settings.model) {
       throw new MutationWorkflowError(
         'PROVIDER_NOT_CONFIGURED',
-        `No model configured for role "${role}" on provider "${provider.id}". Set agents.defaults.model or agents.roles.${role}.model.`,
+        `No model configured for role "${role}" on provider "${provider.id}". Set agents.defaults.model or agents.roles.${role}.model to a model id your provider offers; MutationWorkflow does not pick one for you.`,
       );
     }
     return {
       provider,
-      model,
+      model: settings.model,
       maxTurns: settings.maxTurns ?? DEFAULTS.maxTurns,
       maxTokens: settings.maxTokens ?? DEFAULTS.maxTokens,
       effort: settings.effort,
-      vision: settings.vision ?? provider.supportsVision,
+      vision: settings.vision ?? (isDriver(provider) ? true : provider.supportsVision),
     };
-  }
-
-  /** True when at least one provider is available, i.e. agents can run at all. */
-  get enabled(): boolean {
-    return this.options.providers.size > 0;
   }
 
   /** Tokens and cost spent so far on a job. */
@@ -200,11 +200,6 @@ export class AgentRuntime {
     const resolved = this.resolveModel(options.role);
     const log = this.options.logger.child(`${options.role}${depth ? `@${depth}` : ''}`);
     const tools = [...options.tools];
-    const delegate =
-      options.delegate === false
-        ? undefined
-        : this.delegateTool({ ...options, depth, tools: options.tools });
-    if (delegate && !tools.some((tool) => tool.name === 'delegate')) tools.push(delegate);
 
     let finished: { value: T } | undefined;
     if (options.output) {
@@ -221,7 +216,6 @@ export class AgentRuntime {
         }),
       );
     }
-    const specs = tools.map(toToolSpec);
     const toolContext: ToolContext = {
       role: options.role,
       depth,
@@ -230,6 +224,20 @@ export class AgentRuntime {
       signal: options.signal,
     };
 
+    if (isDriver(resolved.provider)) {
+      const result = await this.drive(options, resolved, tools, toolContext, log);
+      return { ...result, output: finished?.value };
+    }
+
+    // Drivers bring their own sub-agent mechanisms; delegation is for the in-process loop.
+    const delegate =
+      options.delegate === false
+        ? undefined
+        : this.delegateTool({ ...options, depth, tools: options.tools });
+    if (delegate && !tools.some((tool) => tool.name === 'delegate')) tools.push(delegate);
+    const provider = resolved.provider;
+    const model = resolved.model ?? '';
+    const specs = tools.map(toToolSpec);
     const messages: AgentMessage[] = [
       {
         role: 'user',
@@ -272,8 +280,8 @@ export class AgentRuntime {
       try {
         pruneImages(messages);
         response = await this.slots.use(() =>
-          resolved.provider.complete({
-            model: resolved.model,
+          provider.complete({
+            model,
             system: options.system,
             messages,
             tools: specs,
@@ -297,12 +305,12 @@ export class AgentRuntime {
       }
 
       usage = addUsage(usage, response.usage);
-      const callCost = resolved.provider.estimateCostUsd(response.model, response.usage) ?? 0;
+      const callCost = provider.estimateCostUsd(response.model, response.usage) ?? 0;
       costUsd += callCost;
       await this.recordUsage(
         options.jobId,
         options.role,
-        resolved,
+        provider.id,
         response.model,
         response.usage,
         callCost,
@@ -381,36 +389,84 @@ export class AgentRuntime {
     };
   }
 
+  /** Hand the whole task to an external agent runtime, holding one permit for its duration. */
+  private async drive<T>(
+    options: AgentRunOptions<T>,
+    resolved: ResolvedModel,
+    tools: AgentTool[],
+    toolContext: ToolContext,
+    log: Logger,
+  ): Promise<Omit<AgentRunResult<T>, 'output'>> {
+    const budgetError = this.checkBudget(options.jobId);
+    if (budgetError) {
+      log.warn(budgetError);
+      return {
+        text: '',
+        turns: 0,
+        usage: emptyUsage(),
+        costUsd: 0,
+        stoppedBecause: 'budget',
+        error: budgetError,
+      };
+    }
+    if (!isDriver(resolved.provider)) throw new Error('drive() needs a driver');
+    const driver = resolved.provider;
+    const result = await this.slots.use(() =>
+      driver.drive({
+        role: options.role,
+        system: options.system,
+        task: options.task,
+        tools,
+        toolContext,
+        model: resolved.model,
+        maxTurns: resolved.maxTurns,
+        signal: options.signal,
+        logger: log,
+      }),
+    );
+    await this.recordUsage(
+      options.jobId,
+      options.role,
+      driver.id,
+      result.model ?? resolved.model ?? driver.type,
+      result.usage,
+      result.costUsd ?? 0,
+    );
+    options.onEvent?.({
+      type: 'turn',
+      role: options.role,
+      depth: toolContext.depth,
+      turn: result.turns,
+      usage: result.usage,
+    });
+    if (result.text)
+      options.onEvent?.({
+        type: 'text',
+        role: options.role,
+        depth: toolContext.depth,
+        text: result.text,
+      });
+    return {
+      text: result.text,
+      turns: result.turns,
+      usage: result.usage,
+      costUsd: result.costUsd ?? 0,
+      stoppedBecause: result.stoppedBecause,
+      error: result.error,
+    };
+  }
+
   private async executeTool<T>(
     tools: AgentTool[],
     use: ToolUsePart,
     context: ToolContext,
     options: AgentRunOptions<T>,
   ): Promise<ToolResultPart> {
-    const tool = tools.find((candidate) => candidate.name === use.name);
-    const depth = context.depth;
-    let output: ToolOutput;
-    if (!tool) {
-      output = {
-        content: `Unknown tool "${use.name}". Available: ${tools.map((t) => t.name).join(', ')}`,
-        isError: true,
-      };
-    } else {
-      const parsed = tool.schema.safeParse(use.input);
-      if (!parsed.success) {
-        output = {
-          content: `Invalid input for ${tool.name}:\n${z.prettifyError(parsed.error)}`,
-          isError: true,
-        };
-      } else {
-        try {
-          output = await tool.execute(parsed.data, context);
-        } catch (error) {
-          output = { content: `${tool.name} failed: ${errorMessage(error)}`, isError: true };
-        }
-      }
-    }
-    const content = normalizeToolOutput(output);
+    const output = await runTool(tools, use.name, use.input, context);
+    const content =
+      typeof output.content === 'string'
+        ? [{ type: 'text' as const, text: output.content }]
+        : output.content;
     const summary = truncate(
       content
         .filter((part): part is TextPart => part.type === 'text')
@@ -422,7 +478,7 @@ export class AgentRuntime {
     options.onEvent?.({
       type: 'tool',
       role: options.role,
-      depth,
+      depth: context.depth,
       name: use.name,
       ok: !output.isError,
       summary,
@@ -430,27 +486,35 @@ export class AgentRuntime {
     return { type: 'tool_result', toolUseId: use.id, content, isError: output.isError };
   }
 
-  private pickProvider(id: string | undefined): ModelProvider {
+  /**
+   * Pick the provider for a role: the configured one, else the only one available. With several
+   * available and none named, the user has to choose; nothing is assumed.
+   */
+  private pickProvider(id: string | undefined): Provider {
     const { providers } = this.options;
     if (id) {
       const provider = providers.get(id);
       if (!provider) {
         throw new MutationWorkflowError(
           'PROVIDER_NOT_CONFIGURED',
-          `Provider "${id}" is not configured. Known providers: ${[...providers.keys()].join(', ') || 'none'}`,
+          `Provider "${id}" is not configured. Available providers: ${[...providers.keys()].join(', ') || 'none'}`,
         );
       }
       return provider;
     }
-    const preferred =
-      [...providers.values()].find((p) => p.type === 'anthropic') ?? [...providers.values()][0];
-    if (!preferred) {
+    const available = [...providers.values()];
+    const [only] = available;
+    if (available.length === 1 && only) return only;
+    if (available.length === 0) {
       throw new MutationWorkflowError(
         'PROVIDER_NOT_CONFIGURED',
-        'No model provider is configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add a providers entry to the config.',
+        'No model provider is available. Install Claude Code or Codex, set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add a providers section to the config.',
       );
     }
-    return preferred;
+    throw new MutationWorkflowError(
+      'PROVIDER_NOT_CONFIGURED',
+      `Several providers are available (${available.map((p) => p.id).join(', ')}). Set agents.defaults.provider, or agents.roles.<role>.provider, to the one to use.`,
+    );
   }
 
   private checkBudget(jobId: string | undefined): string | undefined {
@@ -470,7 +534,7 @@ export class AgentRuntime {
   private async recordUsage(
     jobId: string | undefined,
     role: AgentRole,
-    resolved: ResolvedModel,
+    providerId: string,
     model: string,
     usage: TokenUsage,
     costUsd: number,
@@ -487,7 +551,7 @@ export class AgentRuntime {
       await this.options.store.usage.record({
         jobId,
         role,
-        provider: resolved.provider.id,
+        provider: providerId,
         model,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
@@ -501,23 +565,6 @@ export class AgentRuntime {
     }
   }
 }
-
-function normalizeToolOutput(output: ToolOutput): Array<TextPart | ImagePart> {
-  const parts: Array<TextPart | ImagePart> =
-    typeof output.content === 'string' ? [{ type: 'text', text: output.content }] : output.content;
-  const normalized = parts.map((part) =>
-    part.type === 'text' ? { ...part, text: truncate(part.text, MAX_TOOL_OUTPUT_CHARS) } : part,
-  );
-  return normalized.length > 0 ? normalized : [{ type: 'text', text: '(no output)' }];
-}
-
-export type { ContentPart };
-
-const MAX_IMAGES_IN_CONTEXT = 2;
-const OMITTED_IMAGE: TextPart = {
-  type: 'text',
-  text: '[earlier screenshot omitted to save context]',
-};
 
 /**
  * Keep only the latest screenshots in the conversation. Observations attach an image per turn,

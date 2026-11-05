@@ -17,7 +17,7 @@ const echoTool = defineTool({
 function runtime(provider: FakeProvider, config: Record<string, unknown> = {}) {
   return new AgentRuntime({
     providers: new Map([[provider.id, provider]]),
-    config: AgentsConfigSchema.parse(config),
+    config: AgentsConfigSchema.parse({ defaults: { model: 'fake-model' }, ...config }),
     logger: silentLogger,
   });
 }
@@ -208,7 +208,7 @@ describe('AgentRuntime', () => {
     expect(provider.requests).toHaveLength(6);
   });
 
-  it('resolves models per role with defaults and fails clearly without a model', async () => {
+  it('resolves models per role with defaults and never guesses a model', async () => {
     const provider = new FakeProvider(() => fakeText('ok'));
     const rt = runtime(provider, {
       defaults: { model: 'm-default', maxTurns: 7 },
@@ -220,8 +220,21 @@ describe('AgentRuntime', () => {
       vision: true,
     });
     expect(rt.resolveModel('triager')).toMatchObject({ model: 'm-triage', effort: 'high' });
-    const noModel = new FakeProvider(() => fakeText('ok'));
-    Object.defineProperty(noModel, 'defaultModel', { value: undefined });
-    expect(() => runtime(noModel).resolveModel('explorer')).toThrow(/No model configured/);
+    const unset = new AgentRuntime({
+      providers: new Map([[provider.id, provider]]),
+      config: AgentsConfigSchema.parse({}),
+      logger: silentLogger,
+    });
+    expect(() => unset.resolveModel('explorer')).toThrow(/No model configured/);
+    const several = new AgentRuntime({
+      providers: new Map([
+        ['a', provider],
+        ['b', new FakeProvider(() => fakeText('ok'), 'b')],
+      ]),
+      config: AgentsConfigSchema.parse({ defaults: { model: 'm' } }),
+      logger: silentLogger,
+    });
+    expect(() => several.resolveModel('explorer')).toThrow(/Several providers are available/);
+    expect(() => several.resolveModel('explorer')).toThrow(/agents.defaults.provider/);
   });
 });

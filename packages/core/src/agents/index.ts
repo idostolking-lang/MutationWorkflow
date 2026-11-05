@@ -1,3 +1,4 @@
+export * from './drivers/index.js';
 export * from './prompts/index.js';
 export * from './provider.js';
 export * from './providers/index.js';
