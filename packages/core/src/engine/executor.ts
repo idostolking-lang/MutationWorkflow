@@ -96,6 +96,15 @@ export async function executeWorkflow(options: ExecuteOptions): Promise<Executio
     }
     await checkInvariants(session, target, 'after-workflow', undefined, assertions);
     signals = session.drainSignals();
+    const troubled =
+      steps.some((s) => s.status !== 'passed' && s.status !== 'skipped') ||
+      assertions.some((a) => !a.passed) ||
+      signals.length > 0;
+    if (troubled && config.execution.screenshots !== 'never') {
+      // Failures through signals or expectations leave no failed action behind, so capture the
+      // final state explicitly for the triager and the report.
+      await session.capture('screenshot', 'final-state').catch(() => undefined);
+    }
   } catch (error) {
     runError = errorMessage(error);
     logger.error(`Run ${runId} failed: ${runError}`);

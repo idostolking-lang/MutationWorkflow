@@ -168,6 +168,7 @@ async function runExplorer(
     const where = deps.baseUrl ? ` The application is served at ${deps.baseUrl}.` : '';
     const result = await deps.runtime.run({
       role: 'explorer',
+      delegate: false,
       system: explorerPrompt({
         target,
         adapter: options.description,

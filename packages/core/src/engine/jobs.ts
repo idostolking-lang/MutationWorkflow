@@ -10,9 +10,16 @@ export interface JobContext {
   progress(message: string, current?: number, total?: number): Promise<void>;
 }
 
+export interface JobStartOptions {
+  /** Aborting this signal cancels the job. */
+  signal?: AbortSignal;
+}
+
+type Outcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
 interface Running {
   controller: AbortController;
-  promise: Promise<unknown>;
+  promise: Promise<Outcome<unknown>>;
 }
 
 /**
@@ -32,6 +39,7 @@ export class JobManager {
     kind: JobKind,
     params: Record<string, unknown>,
     work: (context: JobContext) => Promise<T>,
+    options: JobStartOptions = {},
   ): Promise<Job> {
     const job = JobSchema.parse({
       id: newId('job'),
@@ -43,25 +51,45 @@ export class JobManager {
     });
     await this.store.jobs.insert(job);
     const controller = new AbortController();
+    if (options.signal?.aborted) controller.abort();
+    else options.signal?.addEventListener('abort', () => controller.abort(), { once: true });
     const promise = this.execute(job, controller, work);
     this.running.set(job.id, { controller, promise });
     return job;
   }
 
-  /** Start a job and wait for it; throws when the job fails. */
+  /** Start a job and wait for it; rethrows the job's own error when it fails. */
   async run<T>(
     kind: JobKind,
     params: Record<string, unknown>,
     work: (context: JobContext) => Promise<T>,
+    options: JobStartOptions = {},
   ): Promise<{ job: Job; result: T }> {
-    const job = await this.start(kind, params, work);
+    const job = await this.start(kind, params, work, options);
     const running = this.running.get(job.id);
-    const result = (await running?.promise) as T;
+    const outcome = (await running?.promise) as Outcome<T> | undefined;
     const final = (await this.store.jobs.get(job.id)) ?? job;
-    if (final.status === 'failed') {
-      throw new Error(final.error ?? `Job ${job.id} failed`);
+    if (!outcome) throw new Error(`Job ${job.id} vanished before it finished`);
+    if (!outcome.ok) throw outcome.error;
+    return { job: final, result: outcome.value };
+  }
+
+  /** Mark jobs left `running` by a previous process as failed. Called once at startup. */
+  async recover(): Promise<number> {
+    const stale = (await this.store.jobs.list({ status: ['queued', 'running'] })).filter(
+      (job) => !this.running.has(job.id),
+    );
+    for (const job of stale) {
+      await this.store.jobs.update(
+        JobSchema.parse({
+          ...job,
+          status: 'failed',
+          error: 'Interrupted: the process ended before the job finished',
+          finishedAt: nowIso(),
+        }),
+      );
     }
-    return { job: final, result };
+    return stale.length;
   }
 
   cancel(id: string): boolean {
@@ -69,6 +97,11 @@ export class JobManager {
     if (!running) return false;
     running.controller.abort();
     return true;
+  }
+
+  /** Ids of the jobs running in this process. */
+  get active(): string[] {
+    return [...this.running.keys()];
   }
 
   get(id: string): Promise<Job | undefined> {
@@ -88,7 +121,7 @@ export class JobManager {
     job: Job,
     controller: AbortController,
     work: (context: JobContext) => Promise<T>,
-  ): Promise<T | undefined> {
+  ): Promise<Outcome<T>> {
     const logger = this.logger.child(`job:${job.kind}`);
     let current = job;
     const persist = async (patch: Partial<Job>) => {
@@ -105,14 +138,15 @@ export class JobManager {
       },
     };
     try {
-      const result = await work(context);
+      const value = await work(context);
+      const cancelled = controller.signal.aborted;
       await persist({
-        status: controller.signal.aborted ? 'cancelled' : 'succeeded',
-        result,
+        status: cancelled ? 'cancelled' : 'succeeded',
+        result: value,
         finishedAt: nowIso(),
-        progress: { message: controller.signal.aborted ? 'Cancelled' : 'Done' },
+        progress: { message: cancelled ? 'Cancelled' : 'Done' },
       });
-      return result;
+      return { ok: true, value };
     } catch (error) {
       const message = errorMessage(error);
       logger.error(`Job failed: ${message}`);
@@ -121,7 +155,7 @@ export class JobManager {
         error: message,
         finishedAt: nowIso(),
       });
-      return undefined;
+      return { ok: false, error };
     } finally {
       this.running.delete(job.id);
     }

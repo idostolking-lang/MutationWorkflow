@@ -57,6 +57,8 @@ export interface AgentRunOptions<T> {
   depth?: number;
   signal?: AbortSignal;
   onEvent?: (event: AgentEvent) => void;
+  /** Offer the delegate tool (default true). Off for agents whose tools are bound to one live session. */
+  delegate?: boolean;
 }
 
 export type StopCause = 'finished' | 'max-turns' | 'budget' | 'refusal' | 'aborted' | 'error';
@@ -198,7 +200,10 @@ export class AgentRuntime {
     const resolved = this.resolveModel(options.role);
     const log = this.options.logger.child(`${options.role}${depth ? `@${depth}` : ''}`);
     const tools = [...options.tools];
-    const delegate = this.delegateTool({ ...options, depth, tools: options.tools });
+    const delegate =
+      options.delegate === false
+        ? undefined
+        : this.delegateTool({ ...options, depth, tools: options.tools });
     if (delegate && !tools.some((tool) => tool.name === 'delegate')) tools.push(delegate);
 
     let finished: { value: T } | undefined;

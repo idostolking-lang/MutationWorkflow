@@ -11,12 +11,14 @@ import type {
   TokenUsage,
   ToolSpec,
 } from '../provider.js';
-import { ANTHROPIC_PRICES, estimateCost, findPrice } from './pricing.js';
+import { ANTHROPIC_PRICES, estimateCost, findPrice, type ModelPrice } from './pricing.js';
 
 export interface AnthropicProviderOptions {
   id?: string;
   apiKey?: string;
   baseUrl?: string;
+  /** Overrides the built-in price table for cost estimates. */
+  pricing?: ModelPrice;
 }
 
 /**
@@ -29,9 +31,11 @@ export class AnthropicProvider implements ModelProvider {
   readonly supportsVision = true;
   readonly defaultModel = 'claude-opus-5-5';
   private readonly client: Anthropic;
+  private readonly pricing: ModelPrice | undefined;
 
   constructor(options: AnthropicProviderOptions = {}) {
     this.id = options.id ?? 'anthropic';
+    this.pricing = options.pricing;
     this.client = new Anthropic({
       apiKey: options.apiKey,
       ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
@@ -66,7 +70,7 @@ export class AnthropicProvider implements ModelProvider {
   }
 
   estimateCostUsd(model: string, usage: TokenUsage): number | undefined {
-    const price = findPrice(model, ANTHROPIC_PRICES);
+    const price = this.pricing ?? findPrice(model, ANTHROPIC_PRICES);
     return price ? estimateCost(price, usage) : undefined;
   }
 }

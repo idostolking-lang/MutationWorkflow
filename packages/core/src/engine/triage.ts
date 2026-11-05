@@ -41,8 +41,9 @@ export interface RecordFindingsInput {
 /**
  * Turn a run's failing oracle results into findings, merging with findings that already exist
  * for the same problem. Problems the application reports itself (error signals, invariants) are
- * grouped across workflows; failed steps and expectations are grouped per base workflow, since
- * "step 3 was blocked" means different things in different workflows.
+ * grouped across workflows, because a 500 from one endpoint is one bug however it was reached.
+ * Failed steps and expectations are grouped per exact workflow: a mutated sequence that breaks
+ * an expectation is a problem of that sequence, and its steps are the reproduction.
  */
 export async function recordFindings(
   store: Store,
@@ -53,9 +54,7 @@ export async function recordFindings(
   const touched: Finding[] = [];
   const failures = run.oracles.filter((result) => result.verdict === 'fail');
   for (const result of failures) {
-    const scopeKey = WORKFLOW_INDEPENDENT_ORACLES.has(result.oracle)
-      ? null
-      : (workflow.parentId ?? workflow.id);
+    const scopeKey = WORKFLOW_INDEPENDENT_ORACLES.has(result.oracle) ? null : workflow.id;
     const key = fingerprint({
       targetId: target.id,
       oracle: result.oracle,

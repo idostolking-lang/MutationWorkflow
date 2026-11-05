@@ -103,7 +103,7 @@ describe('generateVariants', () => {
     expect(variant?.steps[1]?.note).toBe('Pay');
   });
 
-  it('applies variant expectations and identity, and keeps archived parents archived', () => {
+  it('applies variant expectations and identity, and inherits the parent status', () => {
     const parent = checkout('archived');
     const variants = generateVariants(parent, resolveOperators(['role-swap']), context, {
       maxVariants: 10,
@@ -116,7 +116,7 @@ describe('generateVariants', () => {
     const [fromPending] = generateVariants(pending, resolveOperators(['truncate']), context, {
       maxVariants: 1,
     });
-    expect(fromPending?.status).toBe('active');
+    expect(fromPending?.status).toBe('pending-review');
   });
 
   it('runs every built-in operator with unique fingerprints and stops at the cap', () => {

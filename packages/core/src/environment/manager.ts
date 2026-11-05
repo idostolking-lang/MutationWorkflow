@@ -1,6 +1,7 @@
 import type { Command, StartCommand, TargetConfig } from '../schema/target.js';
 import { errorMessage, MutationWorkflowError } from '../util/errors.js';
 import type { Logger } from '../util/logger.js';
+import { Semaphore } from '../util/semaphore.js';
 import {
   describeExit,
   OutputBuffer,
@@ -41,6 +42,8 @@ export interface EnvironmentManagerOptions {
  */
 export class EnvironmentManager {
   private readonly logger: Logger;
+  /** One environment per target at a time, so parallel jobs never fight over ports. */
+  private readonly locks = new Map<string, Semaphore>();
 
   constructor(private readonly options: EnvironmentManagerOptions) {
     this.logger = options.logger.child('environment');
@@ -56,8 +59,15 @@ export class EnvironmentManager {
     const baseUrl = typeof configuredBaseUrl === 'string' ? configuredBaseUrl : undefined;
     const output = new OutputBuffer();
     const { start } = target.environment;
-    const proc = start ? await this.startProcess(target, start, output) : undefined;
-    if (!proc && baseUrl !== undefined) await this.probe(target, baseUrl);
+    const release = await this.lockFor(target.id).acquire();
+    let proc: ShellProcess | undefined;
+    try {
+      proc = start ? await this.startProcess(target, start, output) : undefined;
+      if (!proc && baseUrl !== undefined) await this.probe(target, baseUrl);
+    } catch (error) {
+      release();
+      throw error;
+    }
 
     let stopping: Promise<void> | undefined;
     const { rootDir } = this.options;
@@ -70,13 +80,25 @@ export class EnvironmentManager {
       },
       reset: () => runReset(target, rootDir, output, logger),
       stop: () => {
-        if (!proc || !start) return Promise.resolve();
-        stopping ??= stopGroup(proc, start.stopSignal, start.stopTimeoutMs).then(() =>
-          logger.debug('Stopped environment', { target: target.id }),
-        );
+        stopping ??= (
+          proc && start
+            ? stopGroup(proc, start.stopSignal, start.stopTimeoutMs).then(() =>
+                logger.debug('Stopped environment', { target: target.id }),
+              )
+            : Promise.resolve()
+        ).finally(release);
         return stopping;
       },
     };
+  }
+
+  private lockFor(targetId: string): Semaphore {
+    let lock = this.locks.get(targetId);
+    if (!lock) {
+      lock = new Semaphore(1);
+      this.locks.set(targetId, lock);
+    }
+    return lock;
   }
 
   private async startProcess(

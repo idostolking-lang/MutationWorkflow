@@ -28,7 +28,7 @@ export const CommandSchema = z.object({
 });
 export type Command = z.infer<typeof CommandSchema>;
 
-export const StartCommandSchema = CommandSchema.extend({
+export const StartCommandSchema = CommandSchema.omit({ timeoutMs: true }).extend({
   ready: ReadyCheckSchema,
   stopSignal: z.enum(['SIGTERM', 'SIGINT', 'SIGKILL']).default('SIGTERM'),
   stopTimeoutMs: z.number().int().positive().default(10_000),

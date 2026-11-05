@@ -21,6 +21,7 @@ import {
   type TargetConfig,
   type Workflow,
   WorkflowSchema,
+  type WorkflowStatus,
 } from '../schema/index.js';
 import { openSqliteStore } from '../store/sqlite.js';
 import type { RunStats, Store, UsageTotals } from '../store/types.js';
@@ -149,6 +150,8 @@ export class Engine {
     for (const [name, loader] of Object.entries(options.adapters ?? {}))
       registry.register(name, loader);
     const providers = options.providers ?? createProviders(config, { env: options.env, logger });
+    const jobs = new JobManager(store, logger);
+    await jobs.recover();
     return new Engine({
       config,
       rootDir,
@@ -159,7 +162,7 @@ export class Engine {
       registry,
       environments: new EnvironmentManager({ rootDir, logger }),
       agents: new AgentRuntime({ providers, config: config.agents, store, logger }),
-      jobs: new JobManager(store, logger),
+      jobs,
       logger,
       oracles: options.oracles ?? resolveOracles(config.oracles.enabled),
     });
@@ -252,7 +255,7 @@ export class Engine {
   }
 
   /** Inspect the repository with agents and write the configuration and seed workflows. */
-  setup(options: SetupOptions & AgentHooks = {}): Promise<SetupResult> {
+  async setup(options: SetupOptions & AgentHooks = {}): Promise<SetupResult> {
     this.requireAgents('setup');
     const { jobId, signal, onEvent, ...rest } = options;
     return setup(
@@ -324,7 +327,7 @@ export class Engine {
   }
 
   /** Replay workflows, record runs, fold failures into findings, triage and report. */
-  run(options: Omit<RunOptions, 'targets'> & { targetIds?: string[] }): Promise<RunSummary> {
+  async run(options: Omit<RunOptions, 'targets'> & { targetIds?: string[] }): Promise<RunSummary> {
     const { targetIds, ...rest } = options;
     return runWorkflows(
       {
@@ -451,66 +454,87 @@ export class Engine {
     await this.store.questions.update(updated);
     const result: AnswerResult = { question: updated };
 
+    if (question.context.findingId) {
+      // A question about a finding decides that finding and leaves its workflow alone.
+      const finding = await this.store.findings.get(question.context.findingId);
+      if (finding) {
+        const isBug = decision !== 'dismiss';
+        result.finding = FindingSchema.parse({
+          ...finding,
+          status: isBug ? 'confirmed' : 'dismissed',
+          triage: {
+            state: 'done',
+            verdict: isBug ? 'bug' : 'not-a-bug',
+            rationale: answer ?? `Decided by the team (${decision})`,
+            at: now,
+          },
+        });
+        await this.store.findings.update(result.finding);
+      }
+      return result;
+    }
+
     const workflow = question.context.workflowId
       ? await this.store.workflows.get(question.context.workflowId)
       : undefined;
-    if (workflow) {
-      if (decision === 'confirm' && workflow.status === 'pending-review') {
-        result.workflow = WorkflowSchema.parse({ ...workflow, status: 'active', updatedAt: now });
-        await this.store.workflows.update(result.workflow);
-      } else if (decision === 'dismiss' && workflow.status === 'pending-review') {
-        result.workflow = WorkflowSchema.parse({ ...workflow, status: 'archived', updatedAt: now });
-        await this.store.workflows.update(result.workflow);
-      } else if (decision === 'bug' && !question.context.findingId) {
-        result.finding = FindingSchema.parse({
-          id: newId('fnd'),
-          targetId: workflow.targetId,
-          fingerprint: fingerprint({ targetId: workflow.targetId, question: question.id }),
-          title: `Unexpected behaviour in "${workflow.title}"`,
-          summary: answer ?? question.question,
-          severity: 'medium',
-          detectedBy: 'human',
-          status: 'confirmed',
-          triage: {
-            state: 'done',
-            verdict: 'bug',
-            rationale: answer ?? 'Reported while reviewing the workflow',
-            at: now,
-          },
-          workflowIds: [workflow.id],
-          runIds: question.context.runId ? [question.context.runId] : [],
-          evidenceIds: question.context.evidenceIds,
-          reproduction: {
-            workflowId: workflow.id,
-            steps: workflow.steps,
-            mutation: workflow.mutation,
-          },
-          occurrences: 1,
-          firstSeenAt: now,
-          lastSeenAt: now,
-        });
-        await this.store.findings.insert(result.finding);
-      }
-    }
+    if (!workflow) return result;
 
-    const finding = question.context.findingId
-      ? await this.store.findings.get(question.context.findingId)
-      : undefined;
-    if (finding) {
-      const isBug = decision !== 'dismiss';
+    if (decision === 'bug') {
       result.finding = FindingSchema.parse({
-        ...finding,
-        status: isBug ? 'confirmed' : 'dismissed',
+        id: newId('fnd'),
+        targetId: workflow.targetId,
+        fingerprint: fingerprint({ targetId: workflow.targetId, question: question.id }),
+        title: `Unexpected behaviour in "${workflow.title}"`,
+        summary: answer ?? question.question,
+        severity: 'medium',
+        detectedBy: 'human',
+        status: 'confirmed',
         triage: {
           state: 'done',
-          verdict: isBug ? 'bug' : 'not-a-bug',
-          rationale: answer ?? `Decided by the team (${decision})`,
+          verdict: 'bug',
+          rationale: answer ?? 'Reported while reviewing the workflow',
           at: now,
         },
+        workflowIds: [workflow.id],
+        runIds: question.context.runId ? [question.context.runId] : [],
+        evidenceIds: question.context.evidenceIds,
+        reproduction: {
+          workflowId: workflow.id,
+          steps: workflow.steps,
+          mutation: workflow.mutation,
+        },
+        occurrences: 1,
+        firstSeenAt: now,
+        lastSeenAt: now,
       });
-      await this.store.findings.update(result.finding);
+      await this.store.findings.insert(result.finding);
+      return result;
+    }
+
+    if (workflow.status === 'pending-review') {
+      result.workflow = await this.setWorkflowStatus(
+        workflow,
+        decision === 'confirm' ? 'active' : 'archived',
+        now,
+      );
     }
     return result;
+  }
+
+  /** Change a workflow's status and propagate it to its mutation variants. */
+  private async setWorkflowStatus(
+    workflow: Workflow,
+    status: WorkflowStatus,
+    at: string,
+  ): Promise<Workflow> {
+    const updated = WorkflowSchema.parse({ ...workflow, status, updatedAt: at });
+    await this.store.workflows.update(updated);
+    for (const variant of await this.store.workflows.list({ parentId: workflow.id })) {
+      await this.store.workflows.update(
+        WorkflowSchema.parse({ ...variant, status, updatedAt: at }),
+      );
+    }
+    return updated;
   }
 
   async updateFinding(
